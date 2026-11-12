@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub AI Changelog
 // @namespace    https://github.com/zhaobozhen/github_commit_compare_script
-// @version      0.2.5
+// @version      0.2.6
 // @description  在 GitHub 仓库页提供入口，对比任意两个 Commit 或 Tag 并通过自定义 AI 服务生成人类可读的变更日志
 // @author       zhaobozhen
 // @match        https://github.com/*
@@ -2345,6 +2345,89 @@
       background: var(--ok-bg);
       color: var(--ok-fg);
     }
+    .banner.loading {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--fg-muted);
+    }
+    .ai-thinking-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+    .ai-spark-pulse {
+      color: var(--accent);
+      font-size: 13px;
+      line-height: 1;
+      flex-shrink: 0;
+      animation: gh-ai-spark 1.8s ease-in-out infinite;
+    }
+    .ai-shimmer-text {
+      background: linear-gradient(90deg, var(--fg-muted) 0%, var(--fg) 45%, var(--fg-muted) 90%);
+      background-size: 200% 100%;
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      animation: gh-ai-shimmer 2s linear infinite;
+    }
+    .ai-dots {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      flex-shrink: 0;
+    }
+    .ai-dot {
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--accent);
+      opacity: 0.35;
+      animation: gh-ai-dot 1.2s ease-in-out infinite;
+    }
+    .ai-dot:nth-child(2) { animation-delay: 0.2s; }
+    .ai-dot:nth-child(3) { animation-delay: 0.4s; }
+    .thinking-state {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 10px 4px;
+    }
+    .thinking-head {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .skeleton-stack { display: flex; flex-direction: column; gap: 9px; }
+    .skeleton-line {
+      height: 11px;
+      border-radius: 6px;
+      background: linear-gradient(90deg, var(--surface-subtle) 0%, var(--surface-hover) 50%, var(--surface-subtle) 100%);
+      background-size: 200% 100%;
+      animation: gh-ai-shimmer 1.8s ease-in-out infinite;
+    }
+    .skeleton-line.w-78 { width: 78%; }
+    .skeleton-line.w-94 { width: 94%; }
+    .skeleton-line.w-56 { width: 56%; }
+    @keyframes gh-ai-spark {
+      0%, 100% { opacity: 0.55; transform: scale(0.92); }
+      50% { opacity: 1; transform: scale(1.08); }
+    }
+    @keyframes gh-ai-shimmer {
+      0% { background-position: 100% 0; }
+      100% { background-position: -100% 0; }
+    }
+    @keyframes gh-ai-dot {
+      0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+      40% { opacity: 1; transform: translateY(-2px); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ai-spark-pulse, .ai-dot, .skeleton-line { animation: none !important; }
+      .ai-shimmer-text { animation: none !important; background: none; color: var(--fg-muted); -webkit-text-fill-color: currentColor; }
+    }
     .stats-bar {
       display: flex;
       flex-wrap: wrap;
@@ -3052,6 +3135,22 @@
         className: 'empty-state',
         text: '选择两个 Commit、Tag 或分支后点击「生成变更日志」。'
       });
+      const thinkingState = createEl('div', { className: 'thinking-state hidden' }, [
+        createEl('div', { className: 'thinking-head' }, [
+          createEl('span', { className: 'ai-spark-pulse', text: '✦' }),
+          createEl('span', { className: 'ai-shimmer-text', text: 'AI 正在梳理提交与代码变更' }),
+          createEl('span', { className: 'ai-dots', 'aria-hidden': 'true' }, [
+            createEl('span', { className: 'ai-dot' }),
+            createEl('span', { className: 'ai-dot' }),
+            createEl('span', { className: 'ai-dot' })
+          ])
+        ]),
+        createEl('div', { className: 'skeleton-stack', 'aria-hidden': 'true' }, [
+          createEl('div', { className: 'skeleton-line w-78' }),
+          createEl('div', { className: 'skeleton-line w-94' }),
+          createEl('div', { className: 'skeleton-line w-56' })
+        ])
+      ]);
       const renderedOutput = createEl('div', { className: 'markdown-body hidden' });
       const rawOutput = createEl('pre', { className: 'raw-pre hidden' });
 
@@ -3083,7 +3182,7 @@
           createEl('div', { className: 'row' }, [modeRenderedBtn, modeRawBtn]),
           copyBtn
         ]),
-        createEl('div', { className: 'output-box' }, [emptyState, renderedOutput, rawOutput])
+        createEl('div', { className: 'output-box' }, [emptyState, thinkingState, renderedOutput, rawOutput])
       ]);
 
       const newProviderBtn = createEl('button', { type: 'button', className: 'btn btn-sm btn-primary', text: '+ 添加 AI 服务' });
@@ -3260,6 +3359,7 @@
         modeRawBtn,
         copyBtn,
         emptyState,
+        thinkingState,
         renderedOutput,
         rawOutput,
         newProviderBtn,
@@ -3293,7 +3393,22 @@
     function setBanner(bannerEl, text, kind = 'info') {
       if (!text) {
         bannerEl.className = 'banner hidden';
-        bannerEl.textContent = '';
+        bannerEl.replaceChildren();
+        return;
+      }
+      if (kind === 'loading') {
+        bannerEl.className = 'banner loading';
+        bannerEl.replaceChildren(
+          createEl('span', { className: 'ai-thinking-row' }, [
+            createEl('span', { className: 'ai-spark-pulse', text: '✦' }),
+            createEl('span', { className: 'ai-shimmer-text', text }),
+            createEl('span', { className: 'ai-dots', 'aria-hidden': 'true' }, [
+              createEl('span', { className: 'ai-dot' }),
+              createEl('span', { className: 'ai-dot' }),
+              createEl('span', { className: 'ai-dot' })
+            ])
+          ])
+        );
         return;
       }
       bannerEl.className = `banner ${kind === 'warn' || kind === 'error' || kind === 'ok' ? kind : ''}`.trim();
@@ -3325,9 +3440,11 @@
     function updateOutputView() {
       const els = ensureDrawer();
       const hasMarkdown = Boolean(state.markdown);
+      const showThinking = state.isGenerating && !hasMarkdown;
       els.copyBtn.disabled = !hasMarkdown;
       els.regenerateBtn.classList.toggle('hidden', !hasMarkdown || state.isGenerating);
-      els.emptyState.classList.toggle('hidden', hasMarkdown);
+      els.emptyState.classList.toggle('hidden', hasMarkdown || showThinking);
+      els.thinkingState.classList.toggle('hidden', !showThinking);
 
       if (state.outputMode === 'raw') {
         els.modeRawBtn.classList.add('btn-primary');
@@ -3596,6 +3713,7 @@
       els.generateBtn.disabled = isGenerating || !state.repo;
       els.regenerateBtn.classList.toggle('hidden', isGenerating || !state.markdown);
       els.abortBtn.classList.toggle('hidden', !isGenerating);
+      updateOutputView();
     }
 
     async function runGenerate(bypassCache = false) {
@@ -3655,7 +3773,7 @@
       state.stats = null;
       renderStats(els.statsBar, null);
       updateOutputView();
-      setBanner(els.statusBanner, `正在拉取 ${base}...${head} 的 GitHub 对比数据...`, 'info');
+      setBanner(els.statusBanner, `正在拉取 ${base}...${head} 的 GitHub 对比数据`, 'loading');
 
       try {
         const compareUrl = buildCompareApiUrl(state.repo.owner, state.repo.repo, base, head);
@@ -3701,9 +3819,9 @@
           warnings.push(`已按字符预算自动裁剪部分大文件 Diff（未展示 ${promptContext.stats.omittedPatchCount} 个、截断 ${promptContext.stats.partiallyTruncatedPatchCount} 个），全部 Commit 与文件列表仍已保留。`);
         }
         if (warnings.length > 0) {
-          setBanner(els.statusBanner, `${warnings.join(' ')} 正在调用 ${activeProvider.name} 生成中...`, 'warn');
+          setBanner(els.statusBanner, `${warnings.join(' ')} 正在调用 ${activeProvider.name} 生成中`, 'loading');
         } else {
-          setBanner(els.statusBanner, `正在通过 ${activeProvider.name} (${activeProvider.model}) 生成变更日志...`, 'info');
+          setBanner(els.statusBanner, `正在通过 ${activeProvider.name} (${activeProvider.model}) 生成变更日志`, 'loading');
         }
 
         const aiRequestSpec = buildAiRequest(activeProvider, promptContext.systemPrompt, promptContext.userPrompt, {
@@ -3739,7 +3857,7 @@
             }
             if (chunk.reasoningDelta && !state.markdown && !renderedReasoningNotice) {
               renderedReasoningNotice = true;
-              setBanner(els.statusBanner, `${activeProvider.name} 正在推理中，稍后输出变更日志...`, 'info');
+              setBanner(els.statusBanner, `${activeProvider.name} 正在深度思考中`, 'loading');
             }
             if (chunk.textDelta) {
               rawAiOutput += chunk.textDelta;
@@ -3817,8 +3935,8 @@
         })();
         setBanner(
           els.providerTestBanner,
-          `正在流式探测 ${targetHost}（若弹出 Tampermonkey 授权窗口请点击「始终允许」）...`,
-          'info'
+          `正在流式探测 ${targetHost}（若弹出 Tampermonkey 授权窗口请点击「始终允许」）`,
+          'loading'
         );
         let streamCursor = 0;
         let streamText = '';
@@ -3834,10 +3952,10 @@
             streamCursor = chunk.cursor;
             if (chunk.textDelta) {
               streamText += chunk.textDelta;
-              setBanner(els.providerTestBanner, `已收到模型响应流：${streamText.trim().slice(0, 40)}...`, 'info');
+              setBanner(els.providerTestBanner, `已收到模型响应流：${streamText.trim().slice(0, 40)}`, 'loading');
             } else if (chunk.reasoningDelta && !sawReasoning) {
               sawReasoning = true;
-              setBanner(els.providerTestBanner, '模型正在返回推理流，等待输出...', 'info');
+              setBanner(els.providerTestBanner, '模型正在思考中，等待输出', 'loading');
             }
           }
         });
@@ -3846,7 +3964,7 @@
           res = await req.promise;
         } catch (firstErr) {
           if (firstErr && firstErr.isTimeout && draft.type === 'openai' && /\/chat\/completions(\?.*)?$/.test(spec.url)) {
-            setBanner(els.providerTestBanner, '聊天接口超时，正在探测 /models 诊断权限与网络...', 'info');
+            setBanner(els.providerTestBanner, '聊天接口超时，正在探测 /models 诊断权限与网络', 'loading');
             const modelsUrl = spec.url.replace(/\/chat\/completions(\?.*)?$/, '/models$1');
             const modelHeaders = {};
             if (spec.headers.Authorization) {
