@@ -4,12 +4,12 @@
 
 ## 功能特性
 
-- **仓库页集成入口**：自动挂载到仓库头部操作栏（`AI Changelog`），容器不可见时退化为右下角浮动按钮，同时注册油猴菜单命令；支持 GitHub Turbo SPA 路由切换。
+- **仓库页集成入口**：自动挂载到仓库头部操作栏最左侧（`AI Changelog`），容器不可见时退化为右下角浮动按钮，同时注册油猴菜单命令；支持 GitHub Turbo SPA 路由切换。
 - **任意范围对比**：自动加载仓库 Tags 与分支供快速选择，支持手动输入任意 Commit SHA；位于 `/compare/{base}...{head}` 页面时自动预填起止版本。
 - **多 AI 服务配置**：支持配置多个 OpenAI 兼容接口（OpenAI、DeepSeek、OpenRouter、本地 Ollama 等）与 Anthropic Messages 接口（Claude），支持连通性测试与实时切换。
 - **内置免费层一键预设**：内置 `OpenRouter (Free)`（`openrouter/free`）、`Google Gemini`（`gemini-3.8-flash`）、`Groq`（`llama-3.3-70b-versatile`）、`硅基流动 (Free)`（`Qwen/Qwen2.5-7B-Instruct`）及本地 `Ollama` 一键预设，填入免费注册的个人 Key 即可使用。
 - **大变更预算裁剪与截断提示**：自动过滤锁文件（`package-lock.json`、`pnpm-lock.yaml`、`Cargo.lock` 等）、压缩产物及二进制文件，按字符预算公平分配源码 Diff；超大型范围支持切换「仅基于 Commit 摘要」，并在超出 GitHub Compare API 单次上限（250 commits / 300 files）时显式提示。
-- **固定结构化输出框架**：通过 JSON 契约约束 AI 输出并校验 Commit SHA 真实性，流式预览与最终导出统一编译为包含概览、6 大固定分类（破坏性变更 / 新增功能 / 问题修复 / 性能优化 / 重构整理 / 文档与构建）及数据范围说明的标准 Markdown。
+- **固定结构化输出框架**：默认跟随浏览器语言回答（支持手动切换 `简体中文` / `繁體中文` / `English`），通过 JSON 契约约束 AI 输出并校验 Commit SHA 真实性，流式预览与最终导出统一编译为包含概览、6 大固定分类（破坏性变更 / 新增功能 / 问题修复 / 性能优化 / 重构整理 / 文档与构建）及数据范围说明的标准 Markdown。
 - **Shadow DOM 隔离与安全渲染**：自适应 GitHub 明暗主题；通过 AST 安全构建 DOM 节点渲染 Markdown（不使用 `innerHTML`），支持原文切换、一键复制与按仓库/版本范围缓存结果。
 
 ## 安装与使用

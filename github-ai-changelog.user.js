@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub AI Changelog
 // @namespace    https://github.com/zhaobozhen/github_commit_compare_script
-// @version      0.2.0
+// @version      0.2.5
 // @description  在 GitHub 仓库页提供入口，对比任意两个 Commit 或 Tag 并通过自定义 AI 服务生成人类可读的变更日志
 // @author       zhaobozhen
 // @match        https://github.com/*
@@ -35,7 +35,7 @@
   'use strict';
 
   const PREFS_STORE_NAME = 'githubAiChangelogPrefsV1';
-  const CACHE_STORE_NAME = 'githubAiChangelogCacheV2';
+  const CACHE_STORE_NAME = 'githubAiChangelogCacheV3';
   const MAX_CACHE_ENTRIES = 20;
   const DEFAULT_MAX_PATCH_CHARS = 36000;
   const TRIGGER_HOST_ID = 'gh-ai-changelog-trigger-host';
@@ -165,6 +165,14 @@
       performance: '性能优化（Performance）',
       refactoring: '重构与代码整理（Refactoring）',
       chore: '文档、构建与依赖（Docs & Chore）'
+    },
+    'zh-TW': {
+      breaking: '破壞性變更（Breaking Changes）',
+      features: '新增功能（Features）',
+      fixes: '問題修復（Bug Fixes）',
+      performance: '效能優化（Performance）',
+      refactoring: '重構與程式碼整理（Refactoring）',
+      chore: '文件、建置與相依性（Docs & Chore）'
     },
     en: {
       breaking: 'Breaking Changes',
@@ -359,6 +367,32 @@
     };
   }
 
+  function buildWebRefsUrls(owner, repo) {
+    const encOwner = encodeURIComponent(owner);
+    const encRepo = encodeURIComponent(repo);
+    return {
+      tagsUrl: `https://github.com/${encOwner}/${encRepo}/refs?type=tag`,
+      branchesUrl: `https://github.com/${encOwner}/${encRepo}/refs?type=branch`
+    };
+  }
+
+  function parseGitHubRefsPayload(rawText) {
+    try {
+      const parsed = JSON.parse(rawText || '');
+      if (parsed && Array.isArray(parsed.refs)) {
+        return parsed.refs.filter((name) => typeof name === 'string' && name.length > 0);
+      }
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((entry) => (entry && typeof entry.name === 'string' ? entry.name : ''))
+          .filter(Boolean);
+      }
+      return null;
+    } catch (_err) {
+      return null;
+    }
+  }
+
   function isNoiseFile(filename) {
     if (!filename || typeof filename !== 'string') {
       return false;
@@ -372,12 +406,103 @@
     return NOISE_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
   }
 
+  function detectBrowserLanguage(overrideLocale) {
+    if (typeof overrideLocale === 'string' && overrideLocale.trim()) {
+      return overrideLocale.trim();
+    }
+    if (typeof navigator !== 'undefined') {
+      const navLang = navigator.language || (Array.isArray(navigator.languages) && navigator.languages[0]) || '';
+      if (typeof navLang === 'string' && navLang.trim()) {
+        return navLang.trim();
+      }
+    }
+    return 'en';
+  }
+
+  function resolveOutputLanguage(languageSetting = 'auto', browserLangOverride = '') {
+    if (languageSetting === 'zh-CN') {
+      return {
+        setting: 'zh-CN',
+        templateLocale: 'zh-CN',
+        localeCode: 'zh-CN',
+        aiLanguageName: 'Simplified Chinese (简体中文)'
+      };
+    }
+    if (languageSetting === 'zh-TW') {
+      return {
+        setting: 'zh-TW',
+        templateLocale: 'zh-TW',
+        localeCode: 'zh-TW',
+        aiLanguageName: 'Traditional Chinese (繁體中文)'
+      };
+    }
+    if (languageSetting === 'en') {
+      return {
+        setting: 'en',
+        templateLocale: 'en',
+        localeCode: 'en',
+        aiLanguageName: 'English'
+      };
+    }
+
+    const rawBrowser = detectBrowserLanguage(browserLangOverride);
+    const lower = rawBrowser.toLowerCase();
+    if (/^zh(?:[-_](?:tw|hk|mo|hant))\b/.test(lower)) {
+      return {
+        setting: 'auto',
+        templateLocale: 'zh-TW',
+        localeCode: rawBrowser,
+        aiLanguageName: 'Traditional Chinese (繁體中文)'
+      };
+    }
+    if (/^zh\b/.test(lower)) {
+      return {
+        setting: 'auto',
+        templateLocale: 'zh-CN',
+        localeCode: rawBrowser,
+        aiLanguageName: 'Simplified Chinese (简体中文)'
+      };
+    }
+    if (/^en\b/.test(lower)) {
+      return {
+        setting: 'auto',
+        templateLocale: 'en',
+        localeCode: rawBrowser,
+        aiLanguageName: 'English'
+      };
+    }
+    return {
+      setting: 'auto',
+      templateLocale: 'en',
+      localeCode: rawBrowser,
+      aiLanguageName: rawBrowser
+    };
+  }
+
+  function fileDiffPriority(filename) {
+    const lower = String(filename || '').trim().toLowerCase();
+    if (/(?:^|\/)(?:test|tests|__tests__|spec|specs|fixtures?|__snapshots__)(?:\/|$)|\.(?:test|spec)\.[^.]+$/i.test(lower)) {
+      return 2;
+    }
+    if (/(?:^|\/)(?:docs?|\.github)(?:\/|$)|\.(?:md|mdx|txt|yml|yaml|toml|properties)$/i.test(lower) || /gradle|package\.json$/i.test(lower)) {
+      return 1;
+    }
+    return 0;
+  }
+
+  function compactPatchText(patch) {
+    return String(patch || '')
+      .replace(/[ \t]+$/gm, '')
+      .replace(/\n \n(?: \n)+/g, '\n \n');
+  }
+
   function buildChangelogPromptContext(compareData, options = {}) {
     const owner = options.owner || '';
     const repo = options.repo || '';
     const base = options.base || '';
     const head = options.head || '';
-    const language = options.language || 'zh-CN';
+    const resolvedLanguage = resolveOutputLanguage(options.language || 'auto', options.browserLanguage);
+    const language = resolvedLanguage.templateLocale;
     const customPrompt = (options.customPrompt || '').trim();
     const commitsOnly = Boolean(options.commitsOnly);
     const maxPatchChars = Number.isFinite(Number(options.maxPatchChars)) && Number(options.maxPatchChars) > 0
@@ -405,25 +530,22 @@
       const rawMessage = String((commitEntry.commit && commitEntry.commit.message) || '').trim();
       const lines = rawMessage.split(/\r?\n/);
       const subject = lines[0] || '(no message)';
-      const authorName = (commitEntry.commit && commitEntry.commit.author && commitEntry.commit.author.name)
-        || (commitEntry.author && commitEntry.author.login)
-        || 'unknown';
-      const dateIso = (commitEntry.commit && commitEntry.commit.author && commitEntry.commit.author.date) || '';
-      const dateShort = dateIso ? dateIso.slice(0, 10) : '';
-      const meta = [authorName, dateShort].filter(Boolean).join(', ');
       if (commitsOnly && lines.length > 1) {
-        const bodyPreview = lines.slice(1).join(' ').replace(/\s+/g, ' ').trim().slice(0, 220);
+        const bodyLines = lines
+          .slice(1)
+          .filter((line) => !/^(?:Signed-off-by|Co-authored-by|Reviewed-by|Acked-by|Change-Id):/i.test(line.trim()));
+        const bodyPreview = bodyLines.join(' ').replace(/\s+/g, ' ').trim().slice(0, 160);
         if (bodyPreview) {
-          return `- ${sha} ${subject} (${meta}) — ${bodyPreview}`;
+          return `- ${sha} ${subject} — ${bodyPreview}`;
         }
       }
-      return `- ${sha} ${subject}${meta ? ` (${meta})` : ''}`;
+      return `- ${sha} ${subject}`;
     });
 
     const filteredNoiseFiles = [];
     const noPatchFiles = [];
     const patchCandidates = [];
-    const fileInventoryLines = [];
+    const fileMetaByName = new Map();
 
     for (const fileItem of files) {
       const filename = String(fileItem.filename || '');
@@ -433,25 +555,26 @@
       const noise = isNoiseFile(filename);
       const hasPatch = typeof fileItem.patch === 'string' && fileItem.patch.length > 0;
 
-      let tag = '';
       if (noise) {
         filteredNoiseFiles.push(filename);
-        tag = ' [filtered: noise/lockfile/binary]';
       } else if (!hasPatch) {
         noPatchFiles.push(filename);
-        tag = ' [no patch from GitHub API]';
+        const renameSuffix = fileItem.previous_filename ? ` <- ${fileItem.previous_filename}` : '';
+        fileMetaByName.set(filename, `- [${status}] ${filename}${renameSuffix} (+${additions}/-${deletions})`);
       } else if (!commitsOnly) {
+        const compactedPatch = compactPatchText(fileItem.patch);
         patchCandidates.push({
           filename,
           status,
           additions,
           deletions,
-          patch: fileItem.patch
+          priority: fileDiffPriority(filename),
+          patch: compactedPatch
         });
+      } else {
+        const renameSuffix = fileItem.previous_filename ? ` <- ${fileItem.previous_filename}` : '';
+        fileMetaByName.set(filename, `- [${status}] ${filename}${renameSuffix} (+${additions}/-${deletions})`);
       }
-
-      const renameSuffix = fileItem.previous_filename ? ` (from ${fileItem.previous_filename})` : '';
-      fileInventoryLines.push(`- [${status}] ${filename}${renameSuffix} (+${additions}/-${deletions})${tag}`);
     }
 
     const includedPatches = [];
@@ -459,14 +582,20 @@
     let usedPatchChars = 0;
 
     if (!commitsOnly && patchCandidates.length > 0) {
-      // Water-filling allocation by ascending patch size avoids one huge fixture starving all source diffs.
-      const sorted = [...patchCandidates].sort((left, right) => left.patch.length - right.patch.length);
+      // Allocate diff budget to source files first, then shorter patches within each priority tier.
+      const sorted = [...patchCandidates].sort(
+        (left, right) => (left.priority - right.priority) || (left.patch.length - right.patch.length)
+      );
       let remainingBudget = maxPatchChars;
       for (let index = 0; index < sorted.length; index += 1) {
         const candidate = sorted[index];
         const remainingCount = sorted.length - index;
         if (remainingBudget < 200) {
           omittedPatchFiles.push(candidate.filename);
+          fileMetaByName.set(
+            candidate.filename,
+            `- [${candidate.status}] ${candidate.filename} (+${candidate.additions}/-${candidate.deletions})`
+          );
           continue;
         }
         const fairShare = Math.max(1800, Math.floor(remainingBudget / remainingCount));
@@ -488,63 +617,72 @@
       }
     }
 
-    const languageInstruction = language === 'en'
-      ? 'Write "summary", "title", and "detail" values in clear, concise English.'
-      : '使用清晰、自然、准确的简体中文撰写 "summary"、"title" 和 "detail"（保留必要的英文技术术语、类名、函数名与 Commit SHA）。';
-
-    const systemLines = [
-      'You are an expert release manager and senior software engineer.',
-      'Generate an accurate, human-readable changelog strictly grounded in the provided GitHub compare metadata, commit list, file summary, and code diffs.',
-      languageInstruction,
-      'OUTPUT FORMAT CONTRACT: Respond with ONLY a single valid JSON object (no Markdown code fences, no prose before or after) matching this exact structure:',
-      '{\n'
-        + '  "summary": "2-3 sentence executive summary of what changed",\n'
-        + '  "sections": {\n'
-        + '    "breaking": [{ "title": "Short change title", "detail": "Concrete impact and explanation", "commits": ["abc1234"], "modules": ["path/or/module"] }],\n'
-        + '    "features": [],\n'
-        + '    "fixes": [],\n'
-        + '    "performance": [],\n'
-        + '    "refactoring": [],\n'
-        + '    "chore": []\n'
-        + '  }\n'
-        + '}',
-      'SECTION RULES: Use only the 6 section keys ("breaking", "features", "fixes", "performance", "refactoring", "chore"). Keep empty categories as [].',
-      'FORMAT RULES: Do NOT include Markdown headings, bullet markers, commit-count headers, or truncation disclaimers inside JSON fields; the client renders headers, stats, and scope notes deterministically.',
-      'STRICT GROUNDING RULE: Never invent, guess, or extrapolate changes or Commit SHAs that are not present in the provided Commits or diffs. In "commits", only cite short SHAs from the Commits list.'
-    ];
+    let systemLines;
+    if (resolvedLanguage.templateLocale === 'zh-CN') {
+      systemLines = [
+        '你是资深发布经理。依据提供的提交与 Diff 生成面向用户的【简体中文】变更日志。',
+        '语言约束：summary、title、detail 必须全部使用【简体中文】，即使原始提交为英文也须意译为自然中文。',
+        '仅输出单个合法 JSON 对象（禁用 Markdown 围栏与多余文字），Schema：'
+          + '{"summary":"用 2 到 3 句简体中文概括本次核心变更","sections":{"breaking":[{"title":"简短标题(<=12字)","detail":"1句说明行为变化与影响","commits":["abc1234"]}],"features":[],"fixes":[],"performance":[],"refactoring":[],"chore":[]}}',
+        '归类与质量：1) 将关联提交合并为一条主题变更，禁止逐条复读 commit；2) 仅保留真实改变行为/构建的内容，忽略纯格式化/无意义琐碎改动；3) 禁止罗列类名、符号名、文件路径、Markdown 标题或统计信息；4) commits 仅引用输入中的真实短 SHA，严禁编造。'
+      ];
+    } else if (resolvedLanguage.templateLocale === 'zh-TW') {
+      systemLines = [
+        '你是資深發布經理。依據提供的提交與 Diff 產生面向使用者的【繁體中文】變更日誌。',
+        '語言約束：summary、title、detail 必須全部使用【繁體中文】，即使原始提交為英文也須意譯為自然中文。',
+        '僅輸出單個合法 JSON 物件（禁用 Markdown 圍欄與多餘文字），Schema：'
+          + '{"summary":"用 2 到 3 句繁體中文概括本次核心變更","sections":{"breaking":[{"title":"簡短標題(<=12字)","detail":"1句說明行為變化與影響","commits":["abc1234"]}],"features":[],"fixes":[],"performance":[],"refactoring":[],"chore":[]}}',
+        '歸類與品質：1) 將關聯提交合併為一條主題變更，禁止逐條複讀 commit；2) 僅保留真實改變行為/建置的內容，忽略無意義瑣碎改動；3) 禁止羅列類別名、符號名、檔案路徑、Markdown 標題或統計資訊；4) commits 僅引用輸入中的真實短 SHA，嚴禁編造。'
+      ];
+    } else {
+      systemLines = [
+        `Release changelog generator. Summarize the GitHub compare data strictly in ${resolvedLanguage.aiLanguageName}.`,
+        `Return ONLY one valid JSON object (no code fences or prose): {"summary":"2-3 concise sentences","sections":{"breaking":[{"title":"Short title","detail":"1 sentence on behavior and impact","commits":["abc1234"]}],"features":[],"fixes":[],"performance":[],"refactoring":[],"chore":[]}}`,
+        `Rules: 1) Merge related commits into cohesive entries instead of parroting raw commit subjects. 2) Cite only real short SHAs from Commits; never invent changes. 3) Do NOT list class names, symbol names, file paths, headings, or stats. 4) Translate all text into natural ${resolvedLanguage.aiLanguageName}.`
+      ];
+    }
     if (customPrompt) {
-      systemLines.push(`Additional user instruction:\n${customPrompt}`);
+      systemLines.push(`Extra instruction: ${customPrompt}`);
     }
 
     const boundaryNotes = [];
     if (commitsTruncated) {
-      boundaryNotes.push(`GitHub Compare API capped returned commits at ${commits.length} out of ${totalCommits} total commits.`);
+      boundaryNotes.push(`Commits capped by API: ${commits.length}/${totalCommits}`);
     }
     if (filesTruncated) {
-      boundaryNotes.push(`GitHub Compare API capped returned files at ${files.length} (more files may exist).`);
+      boundaryNotes.push(`Files capped by API: ${files.length}`);
     }
     if (commitsOnly) {
-      boundaryNotes.push('User selected commits-only mode; code patches were omitted.');
+      boundaryNotes.push('Commits-only mode (diffs omitted)');
     } else if (omittedPatchFiles.length > 0 || includedPatches.some((item) => item.truncated)) {
-      boundaryNotes.push(`Diff budget (${maxPatchChars} chars) truncated or omitted patches for ${omittedPatchFiles.length} unshown and ${includedPatches.filter((item) => item.truncated).length} partially shown files.`);
+      boundaryNotes.push(`Diff budget: ${includedPatches.filter((item) => item.truncated).length} truncated, ${omittedPatchFiles.length} omitted`);
     }
 
+    const summaryHeader = `Repo: ${owner}/${repo} | ${base}...${head} | Commits: ${commits.length}/${totalCommits} | Files: ${files.length} (+${totalAdditions}/-${totalDeletions})${filteredNoiseFiles.length ? ` | Filtered noise: ${filteredNoiseFiles.length}` : ''}`;
     const userSections = [
-      `Repository: ${owner}/${repo}`,
-      `Compare Range: ${base} ... ${head}`,
-      `Compare Status: ${compareData && compareData.status ? compareData.status : 'unknown'} | Total commits: ${totalCommits} (returned: ${commits.length}) | Changed files listed: ${files.length} (+${totalAdditions}/-${totalDeletions})`
+      boundaryNotes.length > 0 ? `${summaryHeader}\nBoundaries: ${boundaryNotes.join('; ')}` : summaryHeader
     ];
 
-    if (boundaryNotes.length > 0) {
-      userSections.push(`Data Boundaries:\n${boundaryNotes.map((line) => `- ${line}`).join('\n')}`);
+    userSections.push(`Commits (${commitLines.length}):\n${commitLines.length ? commitLines.join('\n') : '(none)'}`);
+
+    const unpatchedLines = [...fileMetaByName.values()];
+    if (unpatchedLines.length > 0) {
+      const previewLines = unpatchedLines.slice(0, 40);
+      const overflowNote = unpatchedLines.length > 40 ? `\n- ... (+${unpatchedLines.length - 40} more files)` : '';
+      userSections.push(`Other Changed Files (${unpatchedLines.length}):\n${previewLines.join('\n')}${overflowNote}`);
     }
 
-    userSections.push(`Commits (${commitLines.length}):\n${commitLines.length ? commitLines.join('\n') : '(none)'}`);
-    userSections.push(`Changed Files (${fileInventoryLines.length}):\n${fileInventoryLines.length ? fileInventoryLines.join('\n') : '(none)'}`);
-
     if (includedPatches.length > 0) {
-      const diffBlocks = includedPatches.map((item) => `### ${item.filename} [${item.status}]${item.truncated ? ' (truncated)' : ''}\n\`\`\`diff\n${item.patch}\n\`\`\``);
-      userSections.push(`Selected Code Diffs (${includedPatches.length} files, ${usedPatchChars} chars):\n${diffBlocks.join('\n\n')}`);
+      const diffBlocks = includedPatches.map((item) => `### ${item.filename} [${item.status}]${item.truncated ? ' (truncated)' : ''}\n${item.patch}`);
+      userSections.push(`Diffs (${includedPatches.length}, ${usedPatchChars} chars):\n${diffBlocks.join('\n\n')}`);
+    }
+
+    if (resolvedLanguage.templateLocale === 'zh-CN') {
+      userSections.push('最终输出提醒：请仅返回合法 JSON，所有 summary、title、detail 必须全部使用简体中文，不要在变更描述中罗列类名或文件路径。');
+    } else if (resolvedLanguage.templateLocale === 'zh-TW') {
+      userSections.push('最終輸出提醒：請僅回傳合法 JSON，所有 summary、title、detail 必須全部使用繁體中文，不要在變更描述中羅列類別名稱或檔案路徑。');
+    } else {
+      userSections.push(`FINAL OUTPUT REMINDER: Return only valid JSON. Write all "summary", "title", and "detail" values strictly in ${resolvedLanguage.aiLanguageName}, and do not list changed class names or file paths.`);
     }
 
     return {
@@ -556,6 +694,7 @@
         base,
         head,
         language,
+        localeCode: resolvedLanguage.localeCode,
         validShas: commits.map((commitEntry) => String(commitEntry.sha || '').toLowerCase()).filter(Boolean)
       },
       stats: {
@@ -991,7 +1130,8 @@
     const repo = grounding.repo || options.repo || '';
     const base = grounding.base || options.base || '';
     const head = grounding.head || options.head || '';
-    const language = grounding.language === 'en' || options.language === 'en' ? 'en' : 'zh-CN';
+    const rawLang = grounding.language || options.language || 'zh-CN';
+    const language = rawLang === 'zh-TW' ? 'zh-TW' : rawLang === 'en' ? 'en' : 'zh-CN';
     const isStreaming = Boolean(options.isStreaming);
 
     const labels = CHANGELOG_SECTION_LABELS[language];
@@ -1003,18 +1143,30 @@
       lines.push(
         `> Range: \`${base}\` ... \`${head}\` · Commits: \`${stats.returnedCommits ?? 0}\`${stats.commitsTruncated ? ` / \`${stats.totalCommits}\`` : ''} · Files changed: \`${stats.listedFiles ?? 0}\` (\`+${stats.totalAdditions ?? 0}\` / \`-${stats.totalDeletions ?? 0}\`)`
       );
+    } else if (language === 'zh-TW') {
+      lines.push(`# 變更日誌：${owner}/${repo} (${base} → ${head})`);
+      lines.push('');
+      lines.push(
+        `> 對比範圍：\`${base}\` ... \`${head}\` · 提交：\`${stats.returnedCommits ?? 0}\`${stats.commitsTruncated ? ` / \`${stats.totalCommits}\`` : ''} 次 · 變更檔案：\`${stats.listedFiles ?? 0}\` 個（\`+${stats.totalAdditions ?? 0}\` / \`-${stats.totalDeletions ?? 0}\`）`
+      );
     } else {
       lines.push(`# 变更日志：${owner}/${repo} (${base} → ${head})`);
       lines.push('');
       lines.push(
-        `> 对比范围：\`${base}\` ... \`${head}\` · 提交：\`${stats.returnedCommits ?? 0}\`${stats.commitsTruncated ? ` / \`${stats.totalCommits}\`` : ''} commits · 变更文件：\`${stats.listedFiles ?? 0}\` 个（\`+${stats.totalAdditions ?? 0}\` / \`-${stats.totalDeletions ?? 0}\`）`
+        `> 对比范围：\`${base}\` ... \`${head}\` · 提交：\`${stats.returnedCommits ?? 0}\`${stats.commitsTruncated ? ` / \`${stats.totalCommits}\`` : ''} 次 · 变更文件：\`${stats.listedFiles ?? 0}\` 个（\`+${stats.totalAdditions ?? 0}\` / \`-${stats.totalDeletions ?? 0}\`）`
       );
     }
 
     if (doc && doc.isStructured) {
       lines.push('');
-      lines.push(language === 'en' ? '## Summary' : '## 概览');
-      lines.push(doc.summary || (isStreaming ? (language === 'en' ? 'Generating summary...' : '正在生成概览...') : (language === 'en' ? 'No summary provided.' : '暂无概览说明。')));
+      lines.push(language === 'en' ? '## Summary' : language === 'zh-TW' ? '## 概覽' : '## 概览');
+      lines.push(
+        doc.summary || (
+          isStreaming
+            ? (language === 'en' ? 'Generating summary...' : language === 'zh-TW' ? '正在產生概覽...' : '正在生成概览...')
+            : (language === 'en' ? 'No summary provided.' : language === 'zh-TW' ? '暫無概覽說明。' : '暂无概览说明。')
+        )
+      );
 
       let renderedItems = 0;
       for (const sectionKey of CHANGELOG_SECTION_ORDER) {
@@ -1025,10 +1177,7 @@
         lines.push('');
         lines.push(`## ${labels[sectionKey]}`);
         for (const item of items) {
-          const refs = [
-            ...(item.commits || []).map((sha) => `\`${sha}\``),
-            ...(item.modules || []).map((mod) => `\`${mod}\``)
-          ];
+          const refs = (item.commits || []).map((sha) => `\`${sha}\``);
           const suffix = refs.length > 0
             ? (language === 'en' ? ` (${refs.join(' · ')})` : `（${refs.join(' · ')}）`)
             : '';
@@ -1049,14 +1198,18 @@
         lines.push('');
         lines.push(language === 'en'
           ? '_No structured changelog entries were extracted for this range._'
-          : '_本次对比未提取到可归类的有效变更条目。_');
+          : language === 'zh-TW'
+            ? '_本次對比未擷取到可歸類的有效變更項目。_'
+            : '_本次对比未提取到可归类的有效变更条目。_');
       }
     } else {
       lines.push('');
       if (!isStreaming) {
         lines.push(language === 'en'
           ? '> Format Note: Model output did not match strict JSON; wrapped into the standard framework.'
-          : '> 格式说明：模型未按严格 JSON 输出，已按标准框架兜底排版。');
+          : language === 'zh-TW'
+            ? '> 格式說明：模型未按嚴格 JSON 輸出，已按標準框架兜底排版。'
+            : '> 格式说明：模型未按严格 JSON 输出，已按标准框架兜底排版。');
         lines.push('');
       }
       if (doc && doc.fallbackBody) {
@@ -1069,32 +1222,44 @@
       if (stats.commitsTruncated) {
         scopeParts.push(language === 'en'
           ? `GitHub Compare API capped returned commits at ${stats.returnedCommits} of ${stats.totalCommits}`
-          : `GitHub Compare API 单次仅返回前 ${stats.returnedCommits} / ${stats.totalCommits} 条提交`);
+          : language === 'zh-TW'
+            ? `GitHub Compare API 單次僅回傳前 ${stats.returnedCommits} / ${stats.totalCommits} 筆提交`
+            : `GitHub Compare API 单次仅返回前 ${stats.returnedCommits} / ${stats.totalCommits} 条提交`);
       }
       if (stats.filesTruncated) {
         scopeParts.push(language === 'en'
           ? `file listing reached the ${stats.listedFiles}-file API limit`
-          : `变更文件列表达到 API ${stats.listedFiles} 个文件上限`);
+          : language === 'zh-TW'
+            ? `變更檔案清單達到 API ${stats.listedFiles} 個檔案上限`
+            : `变更文件列表达到 API ${stats.listedFiles} 个文件上限`);
       }
       if (stats.commitsOnly) {
         scopeParts.push(language === 'en'
           ? 'generated in commits-only mode (code diffs omitted)'
-          : '本次为仅 Commit 摘要模式（未读取代码 Diff）');
+          : language === 'zh-TW'
+            ? '本次為僅 Commit 摘要模式（未讀取程式碼 Diff）'
+            : '本次为仅 Commit 摘要模式（未读取代码 Diff）');
       } else if (stats.omittedPatchCount > 0 || stats.partiallyTruncatedPatchCount > 0) {
         scopeParts.push(language === 'en'
           ? `included ${stats.includedPatchCount} code diffs under budget (${stats.partiallyTruncatedPatchCount} truncated, ${stats.omittedPatchCount} omitted)`
-          : `按预算纳入 ${stats.includedPatchCount} 个代码 Diff（截断 ${stats.partiallyTruncatedPatchCount} 个、省略 ${stats.omittedPatchCount} 个）`);
+          : language === 'zh-TW'
+            ? `依預算納入 ${stats.includedPatchCount} 個程式碼 Diff（截斷 ${stats.partiallyTruncatedPatchCount} 個、省略 ${stats.omittedPatchCount} 個）`
+            : `按预算纳入 ${stats.includedPatchCount} 个代码 Diff（截断 ${stats.partiallyTruncatedPatchCount} 个、省略 ${stats.omittedPatchCount} 个）`);
       } else {
         scopeParts.push(language === 'en'
           ? `based on all ${stats.returnedCommits ?? 0} commits and ${stats.includedPatchCount ?? 0} non-noise code diffs`
-          : `基于接口返回的全部 ${stats.returnedCommits ?? 0} 条提交与 ${stats.includedPatchCount ?? 0} 个非噪声代码 Diff`);
+          : language === 'zh-TW'
+            ? `基於介面回傳的全部 ${stats.returnedCommits ?? 0} 筆提交與 ${stats.includedPatchCount ?? 0} 個非雜訊程式碼 Diff`
+            : `基于接口返回的全部 ${stats.returnedCommits ?? 0} 条提交与 ${stats.includedPatchCount ?? 0} 个非噪声代码 Diff`);
       }
       lines.push('');
       lines.push('---');
       lines.push('');
       lines.push(language === 'en'
         ? `> Scope Note: ${scopeParts.join('; ')}.`
-        : `> 数据范围说明：${scopeParts.join('；')}。`);
+        : language === 'zh-TW'
+          ? `> 資料範圍說明：${scopeParts.join('；')}。`
+          : `> 数据范围说明：${scopeParts.join('；')}。`);
     }
 
     return lines.join('\n');
@@ -1617,7 +1782,8 @@
     return {
       activeProviderId: '',
       providers: [],
-      language: 'zh-CN',
+      language: 'auto',
+      languageExplicit: false,
       maxPatchChars: DEFAULT_MAX_PATCH_CHARS,
       customPrompt: '',
       githubToken: ''
@@ -1643,10 +1809,14 @@
       const activeProviderId = providers.some((item) => item.id === raw.activeProviderId)
         ? raw.activeProviderId
         : (providers[0] ? providers[0].id : '');
+      const allowedLanguages = new Set(['auto', 'zh-CN', 'zh-TW', 'en']);
+      const languageExplicit = raw.languageExplicit === true;
+      const language = languageExplicit && allowedLanguages.has(raw.language) ? raw.language : 'auto';
       return {
         activeProviderId,
         providers,
-        language: raw.language === 'en' ? 'en' : 'zh-CN',
+        language,
+        languageExplicit,
         maxPatchChars: Number.isFinite(Number(raw.maxPatchChars)) && Number(raw.maxPatchChars) > 0
           ? Math.floor(Number(raw.maxPatchChars))
           : DEFAULT_MAX_PATCH_CHARS,
@@ -1899,9 +2069,13 @@
       color: var(--fg);
       cursor: pointer;
       white-space: nowrap;
-      transition: background-color 0.15s ease, border-color 0.15s ease;
+      transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.12s cubic-bezier(0.22, 1, 0.36, 1);
     }
     .btn-trigger:hover { background: var(--bg-hover); border-color: var(--border-hover); }
+    .btn-trigger:active { transform: scale(0.97); }
+    @media (prefers-reduced-motion: reduce) {
+      .btn-trigger { transition: none; transform: none; }
+    }
     .btn-trigger.floating {
       height: 36px;
       padding: 0 14px;
@@ -1942,6 +2116,10 @@
       --fg: #1f2328;
       --fg-muted: #59636e;
       --border: #d1d9e0;
+      --control-bg: #f6f8fa;
+      --control-bg-hover: #eff2f5;
+      --overlay-bg: #ffffff;
+      --overlay-shadow: 0 0 0 1px rgba(209, 217, 224, 0.65), 0 6px 12px -3px rgba(37, 41, 46, 0.04), 0 6px 18px 0 rgba(37, 41, 46, 0.12);
       --accent: #0969da;
       --accent-fg: #ffffff;
       --accent-hover: #0757b8;
@@ -1961,6 +2139,10 @@
       --fg: #e6edf3;
       --fg-muted: #9198a1;
       --border: #30363d;
+      --control-bg: #21262d;
+      --control-bg-hover: #30363d;
+      --overlay-bg: #161b22;
+      --overlay-shadow: 0 0 0 1px #30363d, 0 8px 24px rgba(1, 4, 9, 0.65);
       --accent: #2f81f7;
       --accent-fg: #ffffff;
       --accent-hover: #388bfd;
@@ -1979,10 +2161,19 @@
       inset: 0;
       z-index: 2147483640;
       background: rgba(0, 0, 0, 0.45);
-      display: none;
+      display: flex;
       justify-content: flex-end;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 180ms;
     }
-    .backdrop.open { display: flex; }
+    .backdrop.open {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transition: opacity 220ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 0s;
+    }
     .drawer {
       width: min(760px, 100vw);
       height: 100vh;
@@ -1993,6 +2184,18 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      opacity: 0;
+      transform: translate3d(28px, 0, 0);
+      will-change: transform, opacity;
+      transition: transform 180ms cubic-bezier(0.4, 0, 1, 1), opacity 160ms ease;
+    }
+    .backdrop.open .drawer {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+      transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1), opacity 200ms ease;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .backdrop, .drawer { transition: none !important; transform: none !important; }
     }
     .header {
       display: flex;
@@ -2022,7 +2225,7 @@
       display: block;
     }
     .header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-    .provider-select { width: auto; max-width: 170px; }
+    .provider-select { width: auto; min-width: 132px; max-width: 190px; }
     .body {
       flex: 1;
       overflow-y: auto;
@@ -2222,6 +2425,183 @@
     .hint { font-size: 11.5px; color: var(--fg-muted); margin-top: 4px; }
     .hint-inline { margin-top: 0; }
     .empty-state { color: var(--fg-muted); text-align: center; padding: 36px 16px; font-size: 13px; }
+    .gh-menu-wrap { position: relative; }
+    .gh-select-btn {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      height: 32px;
+      padding: 0 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--control-bg);
+      color: var(--fg);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background-color 0.15s ease, border-color 0.15s ease;
+    }
+    .gh-select-btn:hover { background: var(--control-bg-hover); }
+    .gh-select-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+    .gh-select-sm .gh-select-btn { height: 28px; padding: 0 8px; font-size: 12px; }
+    .gh-select-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: left;
+    }
+    .gh-chevron { width: 16px; height: 16px; flex-shrink: 0; fill: var(--fg-muted); }
+    .gh-overlay {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      min-width: 100%;
+      z-index: 30;
+      border-radius: 12px;
+      background: var(--overlay-bg);
+      box-shadow: var(--overlay-shadow);
+      padding: 6px;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: translate3d(0, -4px, 0) scale(0.985);
+      transform-origin: top center;
+      transition: opacity 140ms cubic-bezier(0.22, 1, 0.36, 1), transform 140ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 140ms;
+    }
+    .gh-overlay.align-right { left: auto; right: 0; }
+    .gh-overlay.open-up {
+      top: auto;
+      bottom: calc(100% + 6px);
+      transform-origin: bottom center;
+      transform: translate3d(0, 4px, 0) scale(0.985);
+    }
+    .gh-overlay.is-open {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: translate3d(0, 0, 0) scale(1);
+      transition: opacity 150ms cubic-bezier(0.22, 1, 0.36, 1), transform 150ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 0s;
+    }
+    .gh-select-overlay { min-width: max(100%, 210px); max-width: 300px; max-height: 240px; overflow-y: auto; }
+    .gh-ref-overlay { width: min(330px, 86vw); padding: 0; overflow: hidden; }
+    .gh-ref-control {
+      display: flex;
+      align-items: center;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      overflow: hidden;
+      transition: border-color 0.15s ease;
+    }
+    .gh-ref-control:focus-within { outline: 2px solid var(--accent); outline-offset: -1px; }
+    .gh-ref-control input.gh-ref-input {
+      flex: 1;
+      min-width: 0;
+      height: 30px;
+      border: none;
+      border-radius: 0;
+      background: transparent;
+      padding: 4px 8px;
+      outline: none;
+    }
+    .gh-ref-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 30px;
+      border: none;
+      border-left: 1px solid var(--border);
+      background: var(--control-bg);
+      color: var(--fg-muted);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .gh-ref-toggle:hover { background: var(--control-bg-hover); color: var(--fg); }
+    .gh-ref-header {
+      padding: 8px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .gh-segmented {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 4px;
+      padding: 2px;
+      border-radius: 6px;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border);
+    }
+    .gh-seg-btn {
+      border: none;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--fg-muted);
+      font: inherit;
+      font-size: 11.5px;
+      font-weight: 500;
+      padding: 3px 6px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .gh-seg-btn:hover { color: var(--fg); }
+    .gh-seg-btn.is-active {
+      background: var(--surface);
+      color: var(--fg);
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+    }
+    .gh-ref-filter {
+      height: 28px;
+      padding: 4px 8px;
+      font-size: 12.5px;
+    }
+    .gh-ref-list {
+      max-height: 230px;
+      overflow-y: auto;
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .gh-action-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      padding: 6px 8px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--fg);
+      font: inherit;
+      font-size: 13px;
+      text-align: left;
+      cursor: pointer;
+    }
+    .gh-action-item:hover { background: var(--surface-hover); }
+    .gh-action-item.is-selected { font-weight: 600; background: var(--surface-subtle); }
+    .gh-item-check { width: 16px; height: 16px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; }
+    .gh-item-check svg { width: 14px; height: 14px; fill: var(--fg); }
+    .gh-item-icon { width: 14px; height: 14px; flex-shrink: 0; fill: var(--fg-muted); }
+    .gh-item-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gh-item-badge {
+      font-size: 11px;
+      color: var(--fg-muted);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0 6px;
+      line-height: 18px;
+      flex-shrink: 0;
+    }
+    .gh-empty-list { padding: 14px 8px; text-align: center; font-size: 12px; color: var(--fg-muted); }
+    @media (prefers-reduced-motion: reduce) {
+      .gh-overlay { transition: none !important; transform: none !important; }
+    }
   `;
 
   function initBrowserApp() {
@@ -2241,6 +2621,370 @@
 
     let drawerElements = null;
     let mountObserverTimer = null;
+    const openMenus = new Set();
+
+    function createOcticonSvg(pathData, className = '') {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('viewBox', '0 0 16 16');
+      svg.setAttribute('aria-hidden', 'true');
+      if (className) {
+        svg.setAttribute('class', className);
+      }
+      const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      pathEl.setAttribute('d', pathData);
+      svg.appendChild(pathEl);
+      return svg;
+    }
+
+    const ICON_CHEVRON = 'M4.427 7.427l3.396 3.396a.25.25 0 00.354 0l3.396-3.396A.25.25 0 0011.396 7H4.604a.25.25 0 00-.177.427z';
+    const ICON_CHECK = 'M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z';
+    const ICON_TAG = 'M1 7.775V2.75C1 1.784 1.784 1 2.75 1h5.025c.464 0 .91.184 1.238.513l6.25 6.25a1.75 1.75 0 0 1 0 2.474l-5.026 5.026a1.75 1.75 0 0 1-2.474 0l-6.25-6.25A1.752 1.752 0 0 1 1 7.775Zm1.5 0c0 .066.026.13.073.177l6.25 6.25a.25.25 0 0 0 .354 0l5.025-5.025a.25.25 0 0 0 0-.354l-6.25-6.25a.25.25 0 0 0-.177-.073H2.75a.25.25 0 0 0-.25.25ZM6 5a1 1 0 1 1 0 2 1 1 0 0 1 0-2Z';
+    const ICON_BRANCH = 'M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z';
+
+    function closeAllMenus(exceptMenu = null) {
+      let closedAny = false;
+      for (const menu of [...openMenus]) {
+        if (menu !== exceptMenu && menu.isOpen()) {
+          menu.close();
+          closedAny = true;
+        }
+      }
+      return closedAny;
+    }
+
+    function createPrimerSelect(config = {}) {
+      let optionsList = Array.isArray(config.options) ? config.options : [];
+      let currentValue = '';
+      const changeListeners = [];
+
+      const wrap = createEl('div', {
+        className: `gh-menu-wrap${config.compact ? ' gh-select-sm' : ''}${config.className ? ` ${config.className}` : ''}`
+      });
+      const labelSpan = createEl('span', { className: 'gh-select-label' });
+      const triggerBtn = createEl('button', {
+        type: 'button',
+        id: config.id || '',
+        className: 'gh-select-btn',
+        'aria-haspopup': 'listbox',
+        'aria-expanded': 'false',
+        'aria-label': config.ariaLabel || ''
+      }, [labelSpan, createOcticonSvg(ICON_CHEVRON, 'gh-chevron')]);
+      const overlay = createEl('div', {
+        className: `gh-overlay gh-select-overlay${config.alignRight ? ' align-right' : ''}`,
+        role: 'listbox'
+      });
+      wrap.appendChild(triggerBtn);
+      wrap.appendChild(overlay);
+
+      function syncLabel() {
+        const matched = optionsList.find((opt) => opt.value === currentValue) || optionsList[0];
+        labelSpan.textContent = matched ? matched.label : '';
+      }
+
+      function renderItems() {
+        overlay.replaceChildren();
+        for (const opt of optionsList) {
+          const selected = opt.value === currentValue;
+          const checkWrap = createEl('span', { className: 'gh-item-check' });
+          if (selected) {
+            checkWrap.appendChild(createOcticonSvg(ICON_CHECK));
+          }
+          const itemBtn = createEl('button', {
+            type: 'button',
+            className: `gh-action-item${selected ? ' is-selected' : ''}`,
+            role: 'option',
+            'aria-selected': selected ? 'true' : 'false'
+          }, [checkWrap, createEl('span', { className: 'gh-item-text', text: opt.label })]);
+          itemBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const changed = currentValue !== opt.value;
+            currentValue = opt.value;
+            syncLabel();
+            renderItems();
+            controller.close();
+            if (changed) {
+              for (const listener of changeListeners) {
+                listener();
+              }
+            }
+          });
+          overlay.appendChild(itemBtn);
+        }
+      }
+
+      const controller = {
+        element: wrap,
+        isOpen() {
+          return overlay.classList.contains('is-open');
+        },
+        open() {
+          closeAllMenus(controller);
+          renderItems();
+          const rect = triggerBtn.getBoundingClientRect();
+          const shouldFlipUp = typeof window !== 'undefined' && rect.bottom + 240 > window.innerHeight && rect.top > 200;
+          overlay.classList.toggle('open-up', shouldFlipUp);
+          overlay.classList.add('is-open');
+          triggerBtn.setAttribute('aria-expanded', 'true');
+          openMenus.add(controller);
+        },
+        close() {
+          overlay.classList.remove('is-open');
+          triggerBtn.setAttribute('aria-expanded', 'false');
+          openMenus.delete(controller);
+        },
+        setOptions(nextOptions, preferredValue) {
+          optionsList = Array.isArray(nextOptions) ? nextOptions : [];
+          if (preferredValue !== undefined && optionsList.some((opt) => opt.value === preferredValue)) {
+            currentValue = preferredValue;
+          } else if (!optionsList.some((opt) => opt.value === currentValue)) {
+            currentValue = optionsList[0] ? optionsList[0].value : '';
+          }
+          syncLabel();
+          if (controller.isOpen()) {
+            renderItems();
+          }
+        },
+        addEventListener(eventName, handler) {
+          if (eventName === 'change' && typeof handler === 'function') {
+            changeListeners.push(handler);
+          }
+        },
+        get value() {
+          return currentValue;
+        },
+        set value(nextVal) {
+          const normalized = String(nextVal ?? '');
+          if (optionsList.some((opt) => opt.value === normalized)) {
+            currentValue = normalized;
+          } else if (optionsList[0]) {
+            currentValue = optionsList[0].value;
+          } else {
+            currentValue = '';
+          }
+          syncLabel();
+          if (controller.isOpen()) {
+            renderItems();
+          }
+        }
+      };
+
+      triggerBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (controller.isOpen()) {
+          controller.close();
+        } else {
+          controller.open();
+        }
+      });
+
+      controller.setOptions(optionsList, config.value);
+      return controller;
+    }
+
+    function createRefPicker(config = {}) {
+      let refsData = { tags: [], branches: [] };
+      let activeTab = 'tags';
+
+      const wrap = createEl('div', { className: 'gh-menu-wrap' });
+      const inputEl = createEl('input', {
+        type: 'text',
+        id: config.id || '',
+        className: 'gh-ref-input',
+        autocomplete: 'off',
+        spellcheck: false,
+        placeholder: config.placeholder || 'Tag / Commit SHA / 分支'
+      });
+      const toggleBtn = createEl('button', {
+        type: 'button',
+        className: 'gh-ref-toggle',
+        'aria-label': '选择 Tag 或分支',
+        'aria-expanded': 'false'
+      }, [createOcticonSvg(ICON_CHEVRON, 'gh-chevron')]);
+      const controlBox = createEl('div', { className: 'gh-ref-control' }, [inputEl, toggleBtn]);
+
+      const tagsTabBtn = createEl('button', { type: 'button', className: 'gh-seg-btn is-active', text: 'Tags (0)' });
+      const branchesTabBtn = createEl('button', { type: 'button', className: 'gh-seg-btn', text: 'Branches (0)' });
+      const allTabBtn = createEl('button', { type: 'button', className: 'gh-seg-btn', text: '全部' });
+      const filterInput = createEl('input', {
+        type: 'text',
+        className: 'gh-ref-filter',
+        autocomplete: 'off',
+        spellcheck: false,
+        placeholder: '筛选 Tag / 分支...'
+      });
+      const listEl = createEl('div', { className: 'gh-ref-list', role: 'listbox' });
+      const overlay = createEl('div', {
+        className: `gh-overlay gh-ref-overlay${config.alignRight ? ' align-right' : ''}`
+      }, [
+        createEl('div', { className: 'gh-ref-header' }, [
+          createEl('div', { className: 'gh-segmented' }, [tagsTabBtn, branchesTabBtn, allTabBtn]),
+          filterInput
+        ]),
+        listEl
+      ]);
+
+      wrap.appendChild(controlBox);
+      wrap.appendChild(overlay);
+
+      function syncTabs() {
+        tagsTabBtn.textContent = `Tags (${refsData.tags.length})`;
+        branchesTabBtn.textContent = `Branches (${refsData.branches.length})`;
+        tagsTabBtn.classList.toggle('is-active', activeTab === 'tags');
+        branchesTabBtn.classList.toggle('is-active', activeTab === 'branches');
+        allTabBtn.classList.toggle('is-active', activeTab === 'all');
+      }
+
+      function renderList(filterQuery = '') {
+        syncTabs();
+        listEl.replaceChildren();
+        const queryLower = filterQuery.trim().toLowerCase();
+        const currentVal = inputEl.value.trim();
+        const sourceItems = [];
+
+        if (activeTab === 'tags' || activeTab === 'all') {
+          for (const name of refsData.tags) {
+            sourceItems.push({ name, kind: 'Tag' });
+          }
+        }
+        if (activeTab === 'branches' || activeTab === 'all') {
+          for (const name of refsData.branches) {
+            sourceItems.push({ name, kind: 'Branch' });
+          }
+        }
+
+        const filtered = queryLower
+          ? sourceItems.filter((item) => item.name.toLowerCase().includes(queryLower))
+          : sourceItems;
+
+        if (filtered.length === 0) {
+          const emptyText = sourceItems.length === 0
+            ? '暂无可选 Tag 或分支，可直接输入 Commit SHA'
+            : '无匹配结果，可直接关闭使用已输入的 Commit SHA';
+          listEl.appendChild(createEl('div', { className: 'gh-empty-list', text: emptyText }));
+          return;
+        }
+
+        for (const item of filtered) {
+          const selected = item.name === currentVal;
+          const checkWrap = createEl('span', { className: 'gh-item-check' });
+          if (selected) {
+            checkWrap.appendChild(createOcticonSvg(ICON_CHECK));
+          }
+          const iconSvg = createOcticonSvg(item.kind === 'Tag' ? ICON_TAG : ICON_BRANCH, 'gh-item-icon');
+          const textSpan = createEl('span', { className: 'gh-item-text', text: item.name });
+          const children = [checkWrap, iconSvg, textSpan];
+          if (activeTab === 'all') {
+            children.push(createEl('span', { className: 'gh-item-badge', text: item.kind }));
+          }
+          const rowBtn = createEl('button', {
+            type: 'button',
+            className: `gh-action-item${selected ? ' is-selected' : ''}`,
+            role: 'option',
+            'aria-selected': selected ? 'true' : 'false'
+          }, children);
+          rowBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            inputEl.value = item.name;
+            controller.close();
+          });
+          listEl.appendChild(rowBtn);
+        }
+      }
+
+      const controller = {
+        element: wrap,
+        input: inputEl,
+        isOpen() {
+          return overlay.classList.contains('is-open');
+        },
+        open(initialFilter = '') {
+          closeAllMenus(controller);
+          if (refsData.tags.length === 0 && refsData.branches.length > 0 && activeTab === 'tags') {
+            activeTab = 'branches';
+          }
+          filterInput.value = initialFilter;
+          renderList(filterInput.value);
+          overlay.classList.add('is-open');
+          toggleBtn.setAttribute('aria-expanded', 'true');
+          openMenus.add(controller);
+        },
+        close() {
+          overlay.classList.remove('is-open');
+          toggleBtn.setAttribute('aria-expanded', 'false');
+          openMenus.delete(controller);
+        },
+        setRefs(nextRefs) {
+          refsData = {
+            tags: Array.isArray(nextRefs && nextRefs.tags) ? nextRefs.tags : [],
+            branches: Array.isArray(nextRefs && nextRefs.branches) ? nextRefs.branches : []
+          };
+          if (refsData.tags.length > 0 && activeTab === 'branches' && refsData.branches.length === 0) {
+            activeTab = 'tags';
+          }
+          if (controller.isOpen()) {
+            renderList(filterInput.value);
+          }
+        },
+        get value() {
+          return inputEl.value;
+        },
+        set value(nextVal) {
+          inputEl.value = String(nextVal ?? '');
+          if (controller.isOpen()) {
+            renderList(filterInput.value);
+          }
+        }
+      };
+
+      overlay.addEventListener('click', (event) => {
+        event.stopPropagation();
+      });
+      inputEl.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (!controller.isOpen()) {
+          controller.open('');
+        }
+      });
+      inputEl.addEventListener('input', () => {
+        if (!controller.isOpen()) {
+          controller.open(inputEl.value);
+        } else {
+          filterInput.value = inputEl.value;
+          renderList(filterInput.value);
+        }
+      });
+      inputEl.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === 'Tab') {
+          controller.close();
+        }
+      });
+      toggleBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (controller.isOpen()) {
+          controller.close();
+        } else {
+          controller.open('');
+          filterInput.focus();
+        }
+      });
+      filterInput.addEventListener('input', () => {
+        renderList(filterInput.value);
+      });
+      tagsTabBtn.addEventListener('click', () => {
+        activeTab = 'tags';
+        renderList(filterInput.value);
+      });
+      branchesTabBtn.addEventListener('click', () => {
+        activeTab = 'branches';
+        renderList(filterInput.value);
+      });
+      allTabBtn.addEventListener('click', () => {
+        activeTab = 'all';
+        renderList(filterInput.value);
+      });
+
+      return controller;
+    }
 
     function syncThemeAttributes() {
       const theme = isDarkThemeActive() ? 'dark' : 'light';
@@ -2267,17 +3011,19 @@
       applyShadowStyles(shadow, DRAWER_CSS);
 
       const repoBadge = createEl('span', { className: 'repo-badge' });
-      const headerProviderSelect = createEl('select', {
+      const headerProviderSelect = createPrimerSelect({
+        id: 'header-provider-select',
         className: 'provider-select',
-        'aria-label': '当前 AI 服务'
+        ariaLabel: '当前 AI 服务',
+        compact: true,
+        alignRight: true,
+        options: [{ value: '', label: '未配置 AI 服务' }]
       });
       const toggleSettingsBtn = createEl('button', { type: 'button', className: 'btn btn-sm', text: '设置' });
       const closeBtn = createEl('button', { type: 'button', className: 'btn btn-sm', 'aria-label': '关闭', text: '✕' });
 
-      const baseInput = createEl('input', {
-        type: 'text',
+      const baseInput = createRefPicker({
         id: 'base-input',
-        list: 'gh-ai-refs-list',
         placeholder: 'Tag / Commit SHA / 分支'
       });
       const swapRefsBtn = createEl('button', {
@@ -2286,13 +3032,11 @@
         title: '交换起止版本',
         text: '⇄'
       });
-      const headInput = createEl('input', {
-        type: 'text',
+      const headInput = createRefPicker({
         id: 'head-input',
-        list: 'gh-ai-refs-list',
-        placeholder: 'Tag / Commit SHA / 分支'
+        placeholder: 'Tag / Commit SHA / 分支',
+        alignRight: true
       });
-      const refsDatalist = createEl('datalist', { id: 'gh-ai-refs-list' });
       const generateBtn = createEl('button', { type: 'button', className: 'btn btn-primary', text: '生成变更日志' });
       const regenerateBtn = createEl('button', { type: 'button', className: 'btn hidden', text: '重新生成' });
       const abortBtn = createEl('button', { type: 'button', className: 'btn btn-danger hidden', text: '停止生成' });
@@ -2316,15 +3060,14 @@
           createEl('div', { className: 'compare-grid' }, [
             createEl('div', {}, [
               createEl('label', { htmlFor: 'base-input', text: 'Base（旧版本 / 起点）' }),
-              baseInput
+              baseInput.element
             ]),
             swapRefsBtn,
             createEl('div', {}, [
               createEl('label', { htmlFor: 'head-input', text: 'Head（新版本 / 终点）' }),
-              headInput
+              headInput.element
             ])
           ]),
-          refsDatalist,
           createEl('div', { className: 'row-between mt-10' }, [
             createEl('div', { className: 'row' }, [generateBtn, regenerateBtn, abortBtn, refreshRefsBtn]),
             createEl('label', { className: 'checkbox-label' }, [
@@ -2347,10 +3090,15 @@
       const providersList = createEl('div');
       const editorTitle = createEl('strong', { text: '添加 AI 服务' });
       const provName = createEl('input', { type: 'text', id: 'prov-name', placeholder: '例如：DeepSeek' });
-      const provType = createEl('select', { id: 'prov-type' }, [
-        createEl('option', { value: 'openai', text: 'OpenAI Compatible (/chat/completions)' }),
-        createEl('option', { value: 'anthropic', text: 'Anthropic Messages (/v1/messages)' })
-      ]);
+      const provType = createPrimerSelect({
+        id: 'prov-type',
+        ariaLabel: '协议类型',
+        alignRight: true,
+        options: [
+          { value: 'openai', label: 'OpenAI Compatible (/chat/completions)' },
+          { value: 'anthropic', label: 'Anthropic Messages (/v1/messages)' }
+        ]
+      });
       const provEndpoint = createEl('input', {
         type: 'text',
         id: 'prov-endpoint',
@@ -2393,7 +3141,7 @@
         createEl('div', { className: 'row mb-8' }, presetButtons),
         createEl('div', { className: 'form-grid' }, [
           createEl('div', {}, [createEl('label', { htmlFor: 'prov-name', text: '服务名称' }), provName]),
-          createEl('div', {}, [createEl('label', { htmlFor: 'prov-type', text: '协议类型' }), provType]),
+          createEl('div', {}, [createEl('label', { htmlFor: 'prov-type', text: '协议类型' }), provType.element]),
           createEl('div', {}, [createEl('label', { htmlFor: 'prov-endpoint', text: 'API Endpoint' }), provEndpoint]),
           createEl('div', {}, [createEl('label', { htmlFor: 'prov-model', text: '模型名称' }), provModel])
         ]),
@@ -2405,10 +3153,16 @@
         providerTestBanner
       ]);
 
-      const prefLanguage = createEl('select', { id: 'pref-language' }, [
-        createEl('option', { value: 'zh-CN', text: '简体中文' }),
-        createEl('option', { value: 'en', text: 'English' })
-      ]);
+      const prefLanguage = createPrimerSelect({
+        id: 'pref-language',
+        ariaLabel: '输出语言',
+        options: [
+          { value: 'auto', label: `跟随浏览器语言（自动 · ${detectBrowserLanguage()}）` },
+          { value: 'zh-CN', label: '简体中文' },
+          { value: 'zh-TW', label: '繁體中文' },
+          { value: 'en', label: 'English' }
+        ]
+      });
       const prefBudget = createEl('input', {
         type: 'number',
         id: 'pref-budget',
@@ -2446,7 +3200,7 @@
         createEl('div', { className: 'card' }, [
           createEl('strong', { className: 'section-title', text: '生成偏好与 GitHub 访问' }),
           createEl('div', { className: 'form-grid' }, [
-            createEl('div', {}, [createEl('label', { htmlFor: 'pref-language', text: '输出语言' }), prefLanguage]),
+            createEl('div', {}, [createEl('label', { htmlFor: 'pref-language', text: '输出语言' }), prefLanguage.element]),
             createEl('div', {}, [createEl('label', { htmlFor: 'pref-budget', text: 'Diff 字符预算' }), prefBudget])
           ]),
           createEl('div', { className: 'mt-8' }, [
@@ -2469,7 +3223,7 @@
               repoBadge
             ]),
             createEl('div', { className: 'header-actions' }, [
-              headerProviderSelect,
+              headerProviderSelect.element,
               toggleSettingsBtn,
               closeBtn
             ])
@@ -2494,7 +3248,6 @@
         baseInput,
         headInput,
         swapRefsBtn,
-        refsDatalist,
         refsHint,
         generateBtn,
         regenerateBtn,
@@ -2598,25 +3351,17 @@
     function syncProviderSelects() {
       const els = ensureDrawer();
       const selectEl = els.headerProviderSelect;
-      selectEl.replaceChildren();
-
       if (state.settings.providers.length === 0) {
-        const emptyOpt = document.createElement('option');
-        emptyOpt.value = '';
-        emptyOpt.textContent = '未配置 AI 服务';
-        selectEl.appendChild(emptyOpt);
+        selectEl.setOptions([{ value: '', label: '未配置 AI 服务' }], '');
         return;
       }
-
-      for (const provider of state.settings.providers) {
-        const opt = document.createElement('option');
-        opt.value = provider.id;
-        opt.textContent = `${provider.name} (${provider.model})`;
-        if (provider.id === state.settings.activeProviderId) {
-          opt.selected = true;
-        }
-        selectEl.appendChild(opt);
-      }
+      selectEl.setOptions(
+        state.settings.providers.map((provider) => ({
+          value: provider.id,
+          label: `${provider.name} (${provider.model})`
+        })),
+        state.settings.activeProviderId
+      );
     }
 
     function renderProvidersList() {
@@ -2722,6 +3467,7 @@
     }
 
     function switchView(mode) {
+      closeAllMenus();
       const els = ensureDrawer();
       state.viewMode = mode;
       const isSettings = mode === 'settings';
@@ -2760,10 +3506,35 @@
       }
 
       els.refsHint.textContent = '正在读取仓库 Tags 与分支...';
-      const { tagsUrl, branchesUrl } = buildRefsApiUrls(repo.owner, repo.repo);
-      const headers = buildGitHubHeaders();
 
       try {
+        const webUrls = buildWebRefsUrls(repo.owner, repo.repo);
+        if (typeof fetch === 'function') {
+          const [webTagRes, webBranchRes] = await Promise.allSettled([
+            fetch(webUrls.tagsUrl, { headers: { Accept: 'application/json' }, credentials: 'same-origin' }),
+            fetch(webUrls.branchesUrl, { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
+          ]);
+          let webTags = null;
+          let webBranches = null;
+          if (webTagRes.status === 'fulfilled' && webTagRes.value.ok) {
+            webTags = parseGitHubRefsPayload(await webTagRes.value.text());
+          }
+          if (webBranchRes.status === 'fulfilled' && webBranchRes.value.ok) {
+            webBranches = parseGitHubRefsPayload(await webBranchRes.value.text());
+          }
+          if (webTags !== null || webBranches !== null) {
+            const refsData = {
+              tags: webTags || [],
+              branches: webBranches || []
+            };
+            state.refsByRepo.set(repo.repoFullName, refsData);
+            populateRefsDatalist(refsData);
+            return;
+          }
+        }
+
+        const { tagsUrl, branchesUrl } = buildRefsApiUrls(repo.owner, repo.repo);
+        const headers = buildGitHubHeaders();
         const [tagsResult, branchesResult] = await Promise.allSettled([
           gmFetchText({ url: tagsUrl, headers, timeout: 20000 }).promise,
           gmFetchText({ url: branchesUrl, headers, timeout: 20000 }).promise
@@ -2773,13 +3544,9 @@
         const branches = [];
 
         if (tagsResult.status === 'fulfilled' && tagsResult.value.status >= 200 && tagsResult.value.status < 300) {
-          const parsedTags = JSON.parse(tagsResult.value.responseText || '[]');
+          const parsedTags = parseGitHubRefsPayload(tagsResult.value.responseText);
           if (Array.isArray(parsedTags)) {
-            for (const entry of parsedTags) {
-              if (entry && entry.name) {
-                tags.push(entry.name);
-              }
-            }
+            tags.push(...parsedTags);
           }
         } else if (tagsResult.status === 'fulfilled' && tagsResult.value.status >= 400) {
           els.refsHint.textContent = formatGitHubError(
@@ -2791,13 +3558,9 @@
         }
 
         if (branchesResult.status === 'fulfilled' && branchesResult.value.status >= 200 && branchesResult.value.status < 300) {
-          const parsedBranches = JSON.parse(branchesResult.value.responseText || '[]');
+          const parsedBranches = parseGitHubRefsPayload(branchesResult.value.responseText);
           if (Array.isArray(parsedBranches)) {
-            for (const entry of parsedBranches) {
-              if (entry && entry.name) {
-                branches.push(entry.name);
-              }
-            }
+            branches.push(...parsedBranches);
           }
         }
 
@@ -2811,18 +3574,8 @@
 
     function populateRefsDatalist(refsData) {
       const els = ensureDrawer();
-      els.refsDatalist.replaceChildren();
-      const combined = [...refsData.tags, ...refsData.branches];
-      const seen = new Set();
-      for (const name of combined) {
-        if (seen.has(name)) {
-          continue;
-        }
-        seen.add(name);
-        const opt = document.createElement('option');
-        opt.value = name;
-        els.refsDatalist.appendChild(opt);
-      }
+      els.baseInput.setRefs(refsData);
+      els.headInput.setRefs(refsData);
 
       if (!els.baseInput.value.trim() && !els.headInput.value.trim()) {
         if (refsData.tags.length >= 2) {
@@ -2873,13 +3626,14 @@
       }
 
       const commitsOnly = els.commitsOnlyCheckbox.checked;
+      const resolvedLang = resolveOutputLanguage(state.settings.language);
       const cacheKey = buildCacheKey(
         state.repo.owner,
         state.repo.repo,
         base,
         head,
         activeProvider.id,
-        state.settings.language,
+        resolvedLang.localeCode,
         commitsOnly
       );
 
@@ -3137,6 +3891,14 @@
 
     function bindDrawerEvents(els) {
       els.closeBtn.addEventListener('click', closeDrawer);
+      els.shadow.addEventListener('click', (event) => {
+        const insideMenu = event.composedPath().some(
+          (node) => node && node.classList && node.classList.contains('gh-menu-wrap')
+        );
+        if (!insideMenu) {
+          closeAllMenus();
+        }
+      });
       els.backdrop.addEventListener('click', (event) => {
         if (event.target === els.backdrop) {
           closeDrawer();
@@ -3144,6 +3906,9 @@
       });
       document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape' && els.backdrop.classList.contains('open')) {
+          if (closeAllMenus()) {
+            return;
+          }
           closeDrawer();
         }
       });
@@ -3261,7 +4026,9 @@
 
       els.savePrefsBtn.addEventListener('click', () => {
         const parsedBudget = Number(els.prefBudget.value);
-        state.settings.language = els.prefLanguage.value === 'en' ? 'en' : 'zh-CN';
+        const chosenLang = els.prefLanguage.value;
+        state.settings.language = ['auto', 'zh-CN', 'zh-TW', 'en'].includes(chosenLang) ? chosenLang : 'auto';
+        state.settings.languageExplicit = true;
         state.settings.maxPatchChars = Number.isFinite(parsedBudget) && parsedBudget >= 4000
           ? Math.floor(parsedBudget)
           : DEFAULT_MAX_PATCH_CHARS;
@@ -3322,13 +4089,17 @@
       syncProviderSelects();
       switchView(initialTab);
       updateOutputView();
-      els.backdrop.classList.add('open');
+      if (!els.backdrop.classList.contains('open')) {
+        void els.backdrop.offsetWidth;
+        els.backdrop.classList.add('open');
+      }
       if (state.repo) {
         fetchRepoRefs(false);
       }
     }
 
     function closeDrawer() {
+      closeAllMenus();
       if (drawerElements) {
         drawerElements.backdrop.classList.remove('open');
       }
@@ -3423,11 +4194,17 @@
         if (existingFloating) {
           existingFloating.remove();
         }
-        if (!document.getElementById(TRIGGER_HOST_ID)) {
+        const existingInline = document.getElementById(TRIGGER_HOST_ID);
+        if (!existingInline) {
           const listItem = document.createElement('li');
           listItem.setAttribute('data-gh-ai-changelog', '1');
           listItem.appendChild(createTriggerShadowButton(false));
-          actionsList.appendChild(listItem);
+          actionsList.prepend(listItem);
+        } else {
+          const parentLi = existingInline.closest('li[data-gh-ai-changelog="1"]');
+          if (parentLi && actionsList.firstElementChild !== parentLi) {
+            actionsList.prepend(parentLi);
+          }
         }
       } else {
         const existingInline = document.getElementById(TRIGGER_HOST_ID);
@@ -3466,12 +4243,17 @@
         mountObserverTimer = setTimeout(() => {
           mountObserverTimer = null;
           const urlChanged = state.lastHref !== window.location.href;
+          const inlineHost = document.getElementById(TRIGGER_HOST_ID);
+          const inlineParent = inlineHost && inlineHost.closest('li[data-gh-ai-changelog="1"]');
+          const inlineNotLeftmost = Boolean(
+            inlineParent && inlineParent.parentElement && inlineParent.parentElement.firstElementChild !== inlineParent
+          );
           const missingTrigger = Boolean(
             state.repo
-            && !document.getElementById(TRIGGER_HOST_ID)
+            && !inlineHost
             && !document.getElementById(FLOATING_HOST_ID)
           );
-          if (urlChanged || missingTrigger) {
+          if (urlChanged || missingTrigger || inlineNotLeftmost) {
             syncRepoMount();
           }
         }, 160);
@@ -3488,9 +4270,13 @@
     module.exports = {
       PROVIDER_PRESETS,
       CHANGELOG_SECTION_ORDER,
+      detectBrowserLanguage,
+      resolveOutputLanguage,
       parseGitHubRepoUrl,
       buildCompareApiUrl,
       buildRefsApiUrls,
+      buildWebRefsUrls,
+      parseGitHubRefsPayload,
       isNoiseFile,
       buildChangelogPromptContext,
       normalizeSectionKey,

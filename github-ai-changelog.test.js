@@ -6,9 +6,13 @@ const assert = require('node:assert/strict');
 const {
   PROVIDER_PRESETS,
   CHANGELOG_SECTION_ORDER,
+  detectBrowserLanguage,
+  resolveOutputLanguage,
   parseGitHubRepoUrl,
   buildCompareApiUrl,
   buildRefsApiUrls,
+  buildWebRefsUrls,
+  parseGitHubRefsPayload,
   isNoiseFile,
   buildChangelogPromptContext,
   normalizeSectionKey,
@@ -98,6 +102,15 @@ test('buildCompareApiUrl and buildRefsApiUrls encode slash-containing refs safel
     tagsUrl: 'https://api.github.com/repos/acme/app/tags?per_page=100',
     branchesUrl: 'https://api.github.com/repos/acme/app/branches?per_page=40'
   });
+
+  assert.deepEqual(buildWebRefsUrls('acme', 'app'), {
+    tagsUrl: 'https://github.com/acme/app/refs?type=tag',
+    branchesUrl: 'https://github.com/acme/app/refs?type=branch'
+  });
+
+  assert.deepEqual(parseGitHubRefsPayload('{"refs":["2.5.5.1","2.5.5"]}'), ['2.5.5.1', '2.5.5']);
+  assert.deepEqual(parseGitHubRefsPayload('[{"name":"v1.0"}]'), ['v1.0']);
+  assert.equal(parseGitHubRefsPayload('<html>not json</html>'), null);
 });
 
 test('isNoiseFile filters lockfiles, minified assets, and binaries without dropping source files', () => {
@@ -189,8 +202,50 @@ test('buildChangelogPromptContext commitsOnly mode omits patches and includes co
   assert.equal(context.stats.includedPatchCount, 0);
   assert.equal(context.stats.commitsOnly, true);
   assert.match(context.userPrompt, /Prevent crash when repository has zero tags/);
-  assert.doesNotMatch(context.userPrompt, /Selected Code Diffs/);
+  assert.doesNotMatch(context.userPrompt, /Diffs \(/);
   assert.match(context.systemPrompt, /English/);
+  assert.doesNotMatch(context.userPrompt, /Bob/);
+});
+
+test('buildChangelogPromptContext prioritizes source diffs over tests and trims duplicate file noise', () => {
+  const largeTestPatch = `+${'t'.repeat(1600)}`;
+  const sourcePatch = '@@ -1,2 +1,3 @@\n+export const fast = true;   \n \n \n \n';
+  const context = buildChangelogPromptContext(
+    {
+      status: 'ahead',
+      total_commits: 1,
+      commits: [
+        {
+          sha: '1234567890abcdef',
+          commit: {
+            message: 'feat: speed up compare\n\nSigned-off-by: Bot <bot@example.com>',
+            author: { name: 'SampleAuthor', date: '2026-11-12T00:00:00Z' }
+          }
+        }
+      ],
+      files: [
+        { filename: 'tests/heavy.test.js', status: 'modified', additions: 50, deletions: 0, patch: largeTestPatch },
+        { filename: 'src/engine.js', status: 'modified', additions: 1, deletions: 0, patch: sourcePatch },
+        { filename: 'package-lock.json', status: 'modified', additions: 99, deletions: 99, patch: '+lock' }
+      ]
+    },
+    {
+      owner: 'acme',
+      repo: 'widget',
+      base: 'v1',
+      head: 'v2',
+      language: 'zh-CN',
+      maxPatchChars: 220
+    }
+  );
+
+  assert.equal(context.stats.includedPatchCount, 1);
+  assert.match(context.userPrompt, /src\/engine\.js/);
+  assert.match(context.userPrompt, /Other Changed Files \(1\):\n- \[modified\] tests\/heavy\.test\.js/);
+  assert.match(context.userPrompt, /Filtered noise: 1/);
+  assert.doesNotMatch(context.userPrompt, /SampleAuthor/);
+  assert.doesNotMatch(context.userPrompt, /Signed-off-by/);
+  assert.doesNotMatch(context.userPrompt, /package-lock\.json/);
 });
 
 test('normalizeEndpoint and buildAiRequest support OpenAI-compatible, Anthropic, and keyless localhost', () => {
@@ -442,6 +497,7 @@ test('parseAndValidateChangelog enforces grounding, strips trailing commas, and 
   const chorePos = compiled.indexOf('## 文档、构建与依赖（Docs & Chore）');
   assert.ok(breakingPos > 0 && fixesPos > breakingPos && chorePos > fixesPos);
   assert.equal(compiled.includes('deadbeef'), false);
+  assert.equal(compiled.includes('src/core.js'), false);
   assert.match(compiled, /GitHub Compare API 单次仅返回前 250 \/ 280 条提交/);
   assert.ok(CHANGELOG_SECTION_ORDER.length === 6);
 
@@ -488,4 +544,59 @@ test('extractStreamingChangelogPreview converts partial JSON into formatted Mark
   assert.match(preview, /\*\*支持导出\*\*：新增复制完整框架（`1234567`）/);
   assert.equal(preview.includes('未闭合条目'), false);
   assert.equal(preview.includes('{"summary"'), false);
+});
+
+test('resolveOutputLanguage follows browser locale when auto and preserves explicit overrides', () => {
+  assert.equal(typeof detectBrowserLanguage(''), 'string');
+  assert.equal(resolveOutputLanguage('auto', 'zh-CN').templateLocale, 'zh-CN');
+  assert.equal(resolveOutputLanguage('auto', 'zh-TW').templateLocale, 'zh-TW');
+  assert.equal(resolveOutputLanguage('auto', 'zh-HK').templateLocale, 'zh-TW');
+  assert.equal(resolveOutputLanguage('auto', 'en-US').templateLocale, 'en');
+  const japanese = resolveOutputLanguage('auto', 'ja-JP');
+  assert.equal(japanese.templateLocale, 'en');
+  assert.equal(japanese.aiLanguageName, 'ja-JP');
+  assert.equal(resolveOutputLanguage('en', 'zh-CN').templateLocale, 'en');
+
+  const jaContext = buildChangelogPromptContext(
+    {
+      status: 'ahead',
+      total_commits: 1,
+      commits: [{ sha: '1234567', commit: { message: 'feat: init', author: { name: 'Dev', date: '2026-11-12T00:00:00Z' } } }],
+      files: []
+    },
+    { owner: 'acme', repo: 'widget', base: 'v1', head: 'v2', language: 'auto', browserLanguage: 'ja-JP' }
+  );
+  assert.match(jaContext.systemPrompt, /strictly in ja-JP/);
+  assert.match(jaContext.userPrompt, /strictly in ja-JP/);
+
+  const zhContext = buildChangelogPromptContext(
+    {
+      status: 'ahead',
+      total_commits: 1,
+      commits: [{ sha: '1234567', commit: { message: 'feat: init', author: { name: 'Dev', date: '2026-11-12T00:00:00Z' } } }],
+      files: []
+    },
+    { owner: 'acme', repo: 'widget', base: 'v1', head: 'v2', language: 'auto', browserLanguage: 'zh-CN' }
+  );
+  assert.match(zhContext.systemPrompt, /用 2 到 3 句简体中文概括/);
+  assert.match(zhContext.systemPrompt, /必须全部使用【简体中文】/);
+  assert.match(zhContext.userPrompt, /必须全部使用简体中文/);
+
+  const twContext = buildChangelogPromptContext(
+    {
+      status: 'ahead',
+      total_commits: 1,
+      commits: [{ sha: '1234567', commit: { message: 'feat: init', author: { name: 'Dev', date: '2026-11-12T00:00:00Z' } } }],
+      files: []
+    },
+    { owner: 'acme', repo: 'widget', base: 'v1', head: 'v2', language: 'auto', browserLanguage: 'zh-TW' }
+  );
+  const twOutput = compileCanonicalChangelog(
+    { isStructured: true, summary: '新增測試摘要', sections: { breaking: [], features: [{ title: '功能', detail: '詳情', commits: ['1234567'], modules: [] }], fixes: [], performance: [], refactoring: [], chore: [] } },
+    twContext
+  );
+  assert.match(twOutput, /# 變更日誌：acme\/widget/);
+  assert.match(twOutput, /## 概覽/);
+  assert.match(twOutput, /## 新增功能（Features）/);
+  assert.match(twOutput, /## 概覽[\s\S]*資料範圍說明/);
 });
