@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub AI Changelog
 // @namespace    https://github.com/zhaobozhen/github_commit_compare_script
-// @version      0.2.6
+// @version      0.2.7
 // @description  在 GitHub 仓库页提供入口，对比任意两个 Commit 或 Tag 并通过自定义 AI 服务生成人类可读的变更日志
 // @author       zhaobozhen
 // @match        https://github.com/*
@@ -35,7 +35,7 @@
   'use strict';
 
   const PREFS_STORE_NAME = 'githubAiChangelogPrefsV1';
-  const CACHE_STORE_NAME = 'githubAiChangelogCacheV3';
+  const CACHE_STORE_NAME = 'githubAiChangelogCacheV4';
   const MAX_CACHE_ENTRIES = 20;
   const DEFAULT_MAX_PATCH_CHARS = 36000;
   const TRIGGER_HOST_ID = 'gh-ai-changelog-trigger-host';
@@ -190,6 +190,9 @@
     breakingchanges: 'breaking',
     incompatible: 'breaking',
     破坏性变更: 'breaking',
+    重大变更: 'breaking',
+    破坏性: 'breaking',
+    不兼容: 'breaking',
     feature: 'features',
     features: 'features',
     feat: 'features',
@@ -198,24 +201,40 @@
     enhancement: 'features',
     enhancements: 'features',
     新增功能: 'features',
+    新功能: 'features',
+    功能: 'features',
+    特性: 'features',
+    新增: 'features',
+    新特性: 'features',
+    功能更新: 'features',
     fix: 'fixes',
     fixes: 'fixes',
     bugfix: 'fixes',
     bugfixes: 'fixes',
     bug: 'fixes',
     bugs: 'fixes',
+    hotfix: 'fixes',
     问题修复: 'fixes',
+    修复: 'fixes',
+    缺陷修复: 'fixes',
+    缺陷: 'fixes',
+    bug修复: 'fixes',
     perf: 'performance',
     performance: 'performance',
     optimization: 'performance',
     optimizations: 'performance',
+    speed: 'performance',
     性能优化: 'performance',
+    性能: 'performance',
+    优化: 'performance',
     refactor: 'refactoring',
     refactoring: 'refactoring',
     cleanup: 'refactoring',
     codecleanup: 'refactoring',
     重构: 'refactoring',
     重构与代码整理: 'refactoring',
+    整理: 'refactoring',
+    代码重构: 'refactoring',
     chore: 'chore',
     chores: 'chore',
     docs: 'chore',
@@ -225,9 +244,17 @@
     ci: 'chore',
     deps: 'chore',
     dependencies: 'chore',
+    dependency: 'chore',
+    tool: 'chore',
+    tools: 'chore',
     docschore: 'chore',
     other: 'chore',
     misc: 'chore',
+    文档: 'chore',
+    构建: 'chore',
+    依赖: 'chore',
+    其他: 'chore',
+    杂项: 'chore',
     文档构建与依赖: 'chore',
     文档与构建: 'chore'
   };
@@ -623,22 +650,22 @@
         '你是资深发布经理。依据提供的提交与 Diff 生成面向用户的【简体中文】变更日志。',
         '语言约束：summary、title、detail 必须全部使用【简体中文】，即使原始提交为英文也须意译为自然中文。',
         '仅输出单个合法 JSON 对象（禁用 Markdown 围栏与多余文字），Schema：'
-          + '{"summary":"用 2 到 3 句简体中文概括本次核心变更","sections":{"breaking":[{"title":"简短标题(<=12字)","detail":"1句说明行为变化与影响","commits":["abc1234"]}],"features":[],"fixes":[],"performance":[],"refactoring":[],"chore":[]}}',
-        '归类与质量：1) 将关联提交合并为一条主题变更，禁止逐条复读 commit；2) 仅保留真实改变行为/构建的内容，忽略纯格式化/无意义琐碎改动；3) 禁止罗列类名、符号名、文件路径、Markdown 标题或统计信息；4) commits 仅引用输入中的真实短 SHA，严禁编造。'
+          + '{"summary":"用 2 到 3 句简体中文概括本次核心变更","sections":{"breaking":[],"features":[{"title":"简短标题(<=12字)","detail":"1句说明行为变化与影响","commits":["abc1234"]}],"fixes":[],"performance":[],"refactoring":[],"chore":[]}}',
+        '归类与质量：1) sections 严禁全部留空！必须根据 Diff 至少提取 1 到 5 条条目（通常放入 features、fixes 或 chore）；2) 将关联提交合并为一条主题变更，禁止逐条复读 commit；3) 仅保留真实改变行为/构建的内容，忽略纯格式化/无意义琐碎改动；4) 禁止罗列类名、符号名、文件路径、Markdown 标题或统计信息；5) commits 仅引用输入中的真实短 SHA，严禁编造。'
       ];
     } else if (resolvedLanguage.templateLocale === 'zh-TW') {
       systemLines = [
         '你是資深發布經理。依據提供的提交與 Diff 產生面向使用者的【繁體中文】變更日誌。',
         '語言約束：summary、title、detail 必須全部使用【繁體中文】，即使原始提交為英文也須意譯為自然中文。',
         '僅輸出單個合法 JSON 物件（禁用 Markdown 圍欄與多餘文字），Schema：'
-          + '{"summary":"用 2 到 3 句繁體中文概括本次核心變更","sections":{"breaking":[{"title":"簡短標題(<=12字)","detail":"1句說明行為變化與影響","commits":["abc1234"]}],"features":[],"fixes":[],"performance":[],"refactoring":[],"chore":[]}}',
-        '歸類與品質：1) 將關聯提交合併為一條主題變更，禁止逐條複讀 commit；2) 僅保留真實改變行為/建置的內容，忽略無意義瑣碎改動；3) 禁止羅列類別名、符號名、檔案路徑、Markdown 標題或統計資訊；4) commits 僅引用輸入中的真實短 SHA，嚴禁編造。'
+          + '{"summary":"用 2 到 3 句繁體中文概括本次核心變更","sections":{"breaking":[],"features":[{"title":"簡短標題(<=12字)","detail":"1句說明行為變化與影響","commits":["abc1234"]}],"fixes":[],"performance":[],"refactoring":[],"chore":[]}}',
+        '歸類與品質：1) sections 嚴禁全部留空！必須依據 Diff 至少提取 1 到 5 條項目（通常放入 features、fixes 或 chore）；2) 將關聯提交合併為一條主題變更，禁止逐條複讀 commit；3) 僅保留真實改變行為/建置的內容，忽略無意義瑣碎改動；4) 禁止羅列類別名、符號名、檔案路徑、Markdown 標題或統計資訊；5) commits 僅引用輸入中的真實短 SHA，嚴禁編造。'
       ];
     } else {
       systemLines = [
         `Release changelog generator. Summarize the GitHub compare data strictly in ${resolvedLanguage.aiLanguageName}.`,
-        `Return ONLY one valid JSON object (no code fences or prose): {"summary":"2-3 concise sentences","sections":{"breaking":[{"title":"Short title","detail":"1 sentence on behavior and impact","commits":["abc1234"]}],"features":[],"fixes":[],"performance":[],"refactoring":[],"chore":[]}}`,
-        `Rules: 1) Merge related commits into cohesive entries instead of parroting raw commit subjects. 2) Cite only real short SHAs from Commits; never invent changes. 3) Do NOT list class names, symbol names, file paths, headings, or stats. 4) Translate all text into natural ${resolvedLanguage.aiLanguageName}.`
+        `Return ONLY one valid JSON object (no code fences or prose): {"summary":"2-3 concise sentences","sections":{"breaking":[],"features":[{"title":"Short title","detail":"1 sentence on behavior and impact","commits":["abc1234"]}],"fixes":[],"performance":[],"refactoring":[],"chore":[]}}`,
+        `Rules: 1) Do NOT leave all sections empty; extract at least 1-5 concrete entries into features, fixes, or chore based on diffs. 2) Merge related commits into cohesive entries instead of parroting raw commit subjects. 3) Cite only real short SHAs from Commits; never invent changes. 4) Do NOT list class names, symbol names, file paths, headings, or stats. 5) Translate all text into natural ${resolvedLanguage.aiLanguageName}.`
       ];
     }
     if (customPrompt) {
@@ -678,11 +705,11 @@
     }
 
     if (resolvedLanguage.templateLocale === 'zh-CN') {
-      userSections.push('最终输出提醒：请仅返回合法 JSON，所有 summary、title、detail 必须全部使用简体中文，不要在变更描述中罗列类名或文件路径。');
+      userSections.push('最终输出提醒：请仅返回合法 JSON，sections 严禁全部留空，所有 summary、title、detail 必须全部使用简体中文，不要在变更描述中罗列类名或文件路径。');
     } else if (resolvedLanguage.templateLocale === 'zh-TW') {
-      userSections.push('最終輸出提醒：請僅回傳合法 JSON，所有 summary、title、detail 必須全部使用繁體中文，不要在變更描述中羅列類別名稱或檔案路徑。');
+      userSections.push('最終輸出提醒：請僅回傳合法 JSON，sections 嚴禁全部留空，所有 summary、title、detail 必須全部使用繁體中文，不要在變更描述中羅列類別名稱或檔案路徑。');
     } else {
-      userSections.push(`FINAL OUTPUT REMINDER: Return only valid JSON. Write all "summary", "title", and "detail" values strictly in ${resolvedLanguage.aiLanguageName}, and do not list changed class names or file paths.`);
+      userSections.push(`FINAL OUTPUT REMINDER: Return only valid JSON. Do not leave all sections empty. Write all "summary", "title", and "detail" values strictly in ${resolvedLanguage.aiLanguageName}, and do not list changed class names or file paths.`);
     }
 
     return {
@@ -883,23 +910,54 @@
 
   function normalizeSectionEntry(rawEntry, validShas) {
     if (typeof rawEntry === 'string') {
-      const text = rawEntry.trim();
-      return text ? { entry: { title: '', detail: text, commits: [], modules: [] }, droppedShasCount: 0 } : null;
+      const text = rawEntry.trim().replace(/^[-*+]\s+/, '');
+      if (!text) {
+        return [];
+      }
+      if (text.includes('\n- ') || text.includes('\n* ')) {
+        const lines = text.split(/\r?\n/).map((l) => l.trim().replace(/^[-*+]\s+/, '')).filter(Boolean);
+        return lines.map((line) => ({
+          entry: { title: '', detail: line, commits: [], modules: [] },
+          droppedShasCount: 0
+        }));
+      }
+      return [{ entry: { title: '', detail: text, commits: [], modules: [] }, droppedShasCount: 0 }];
     }
     if (!rawEntry || typeof rawEntry !== 'object') {
-      return null;
+      return [];
+    }
+    const nestedItems = rawEntry.items || rawEntry.entries || rawEntry.changes || rawEntry.list;
+    if (Array.isArray(nestedItems) && nestedItems.length > 0) {
+      const unrolled = [];
+      for (const subItem of nestedItems) {
+        unrolled.push(...normalizeSectionEntry(subItem, validShas));
+      }
+      return unrolled;
     }
     let title = String(rawEntry.title || rawEntry.name || '').trim();
-    const detail = String(rawEntry.detail || rawEntry.description || rawEntry.summary || '').trim();
-    if (title && detail && title === detail) {
+    let detail = String(
+      rawEntry.detail
+      || rawEntry.description
+      || rawEntry.desc
+      || rawEntry.content
+      || rawEntry.text
+      || rawEntry.message
+      || rawEntry.body
+      || rawEntry.summary
+      || ''
+    ).trim();
+    if (title && !detail) {
+      detail = title;
+      title = '';
+    } else if (title && detail && title === detail) {
       title = '';
     }
     if (!title && !detail) {
-      return null;
+      return [];
     }
-    const shaResult = normalizeCommitRefs(rawEntry.commits || rawEntry.commit || rawEntry.shas, validShas);
+    const shaResult = normalizeCommitRefs(rawEntry.commits || rawEntry.commit || rawEntry.shas || rawEntry.sha, validShas);
     const modules = normalizeModuleRefs(rawEntry.modules || rawEntry.files || rawEntry.scope);
-    return {
+    return [{
       entry: {
         title,
         detail,
@@ -907,7 +965,7 @@
         modules
       },
       droppedShasCount: shaResult.droppedCount
-    };
+    }];
   }
 
   function parseAndValidateChangelog(rawOutput, grounding = {}) {
@@ -922,26 +980,44 @@
           let droppedShasCount = 0;
           let itemCount = 0;
 
-          const sectionSource = parsed.sections && typeof parsed.sections === 'object' && !Array.isArray(parsed.sections)
-            ? parsed.sections
-            : parsed;
+          const appendEntryList = (bucketKey, entryList) => {
+            for (const item of entryList) {
+              sections[bucketKey].push(item.entry);
+              droppedShasCount += item.droppedShasCount;
+              itemCount += 1;
+            }
+          };
 
-          for (const [rawKey, rawItems] of Object.entries(sectionSource)) {
-            if (sectionSource === parsed && ['summary', 'overview', 'executive_summary'].includes(rawKey)) {
-              continue;
-            }
-            if (!Array.isArray(rawItems)) {
-              continue;
-            }
-            const bucketKey = normalizeSectionKey(rawKey);
-            for (const rawItem of rawItems) {
-              const normalized = normalizeSectionEntry(rawItem, validShas);
-              if (!normalized) {
+          const source = parsed.sections || parsed.changes || parsed.categories || parsed.changelog || parsed;
+
+          if (Array.isArray(source)) {
+            for (const group of source) {
+              if (!group || typeof group !== 'object') {
                 continue;
               }
-              sections[bucketKey].push(normalized.entry);
-              droppedShasCount += normalized.droppedShasCount;
-              itemCount += 1;
+              const catName = group.category || group.name || group.section || group.type || group.group || '';
+              const bucketKey = normalizeSectionKey(catName);
+              const entries = normalizeSectionEntry(group, validShas);
+              appendEntryList(bucketKey, entries);
+            }
+          } else if (source && typeof source === 'object') {
+            for (const [rawKey, rawVal] of Object.entries(source)) {
+              if (['summary', 'overview', 'executive_summary'].includes(rawKey)) {
+                continue;
+              }
+              const bucketKey = normalizeSectionKey(rawKey);
+              if (Array.isArray(rawVal)) {
+                for (const rawItem of rawVal) {
+                  appendEntryList(bucketKey, normalizeSectionEntry(rawItem, validShas));
+                }
+              } else if (typeof rawVal === 'string') {
+                const lines = rawVal.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+                for (const line of lines) {
+                  appendEntryList(bucketKey, normalizeSectionEntry(line, validShas));
+                }
+              } else if (rawVal && typeof rawVal === 'object') {
+                appendEntryList(bucketKey, normalizeSectionEntry(rawVal, validShas));
+              }
             }
           }
 
@@ -1084,8 +1160,10 @@
             try {
               const parsedItem = JSON.parse(stripTrailingCommas(itemSlice));
               const normalized = normalizeSectionEntry(parsedItem, validShas);
-              if (normalized) {
-                sections[activeSectionKey].push(normalized.entry);
+              if (Array.isArray(normalized)) {
+                for (const subItem of normalized) {
+                  sections[activeSectionKey].push(subItem.entry);
+                }
               }
             } catch (_err) {
               // Ignore malformed partial object while streaming.
@@ -1177,6 +1255,9 @@
         lines.push('');
         lines.push(`## ${labels[sectionKey]}`);
         for (const item of items) {
+          if (!item) {
+            continue;
+          }
           const refs = (item.commits || []).map((sha) => `\`${sha}\``);
           const suffix = refs.length > 0
             ? (language === 'en' ? ` (${refs.join(' · ')})` : `（${refs.join(' · ')}）`)
@@ -1201,6 +1282,13 @@
           : language === 'zh-TW'
             ? '_本次對比未擷取到可歸類的有效變更項目。_'
             : '_本次对比未提取到可归类的有效变更条目。_');
+      } else if (!isStreaming && renderedItems === 0) {
+        lines.push('');
+        lines.push(language === 'en'
+          ? '_No specific category entries were extracted by the model (click "Regenerate" or try another model in Settings)._'
+          : language === 'zh-TW'
+            ? '_本次對比模型未提煉出分類變更項目（可點擊「重新產生」或在設定中切換模型）。_'
+            : '_本次对比模型未提炼出分类变更条目（可点击「重新生成」或在设置中切换模型）。_');
       }
     } else {
       lines.push('');

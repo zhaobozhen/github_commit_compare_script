@@ -579,6 +579,7 @@ test('resolveOutputLanguage follows browser locale when auto and preserves expli
     { owner: 'acme', repo: 'widget', base: 'v1', head: 'v2', language: 'auto', browserLanguage: 'zh-CN' }
   );
   assert.match(zhContext.systemPrompt, /用 2 到 3 句简体中文概括/);
+  assert.match(zhContext.systemPrompt, /sections 严禁全部留空/);
   assert.match(zhContext.systemPrompt, /必须全部使用【简体中文】/);
   assert.match(zhContext.userPrompt, /必须全部使用简体中文/);
 
@@ -599,4 +600,44 @@ test('resolveOutputLanguage follows browser locale when auto and preserves expli
   assert.match(twOutput, /## 概覽/);
   assert.match(twOutput, /## 新增功能（Features）/);
   assert.match(twOutput, /## 概覽[\s\S]*資料範圍說明/);
+});
+
+test('parseAndValidateChangelog handles array of categories, nested items, and bullet string values', () => {
+  const grounding = {
+    owner: 'tw93',
+    repo: 'Pake',
+    validShas: ['be35fa3']
+  };
+
+  // Variant 1: sections as array of category objects
+  const variantArr = JSON.stringify({
+    summary: 'Pake 项目版本更新',
+    sections: [
+      { category: 'features', items: [{ title: '窗口尺寸', detail: '记住全屏尺寸', commits: ['be35fa3'] }] },
+      { category: 'fixes', items: [{ desc: '修复拖拽问题' }] }
+    ]
+  });
+  const resArr = parseAndValidateChangelog(variantArr, grounding);
+  assert.equal(resArr.isStructured, true);
+  assert.equal(resArr.sections.features.length, 1);
+  assert.equal(resArr.sections.fixes.length, 1);
+  assert.equal(resArr.sections.fixes[0].detail, '修复拖拽问题');
+
+  // Variant 2: sections as object with multiline string bullets
+  const variantBullets = JSON.stringify({
+    summary: 'Pake 项目版本更新',
+    sections: {
+      features: '- 支持全屏尺寸保持\n- 优化拖拽交互',
+      fixes: '- 修复拖拽问题'
+    }
+  });
+  const resBullets = parseAndValidateChangelog(variantBullets, grounding);
+  assert.equal(resBullets.isStructured, true);
+  assert.equal(resBullets.sections.features.length, 2);
+  assert.equal(resBullets.sections.fixes.length, 1);
+
+  // Variant 3: empty sections with summary compiles explanatory notice instead of empty whitespace
+  const emptySectionsDoc = { isStructured: true, summary: '只有概览', sections: { breaking: [], features: [], fixes: [], performance: [], refactoring: [], chore: [] } };
+  const emptyCompiled = compileCanonicalChangelog(emptySectionsDoc, { grounding: { owner: 'a', repo: 'b', language: 'zh-CN' } });
+  assert.match(emptyCompiled, /未提炼出分类变更条目/);
 });
